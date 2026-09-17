@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.npm-cache/
+.edge-*/
+__pycache__/
+*.pyc
+*.tsbuildinfo
+.env
+.venv/
+uploads/
+.pytest_cache/
+backend/instance/
+frontend/vite.config.js
+frontend/vite.config.d.ts

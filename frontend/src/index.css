@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { @apply border-slate-200; }
+  html { scroll-behavior: smooth; }
+  body { @apply m-0 bg-paper font-sans text-slate-900 antialiased; }
+  button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
+  ::selection { @apply bg-mint text-ink; }
+}
+
+@layer components {
+  .glass { @apply border border-white/10 bg-white/10 backdrop-blur-xl; }
+  .panel { @apply rounded-3xl border border-slate-200/80 bg-white shadow-soft; }
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition duration-200 disabled:pointer-events-none disabled:opacity-50; }
+  .btn-primary { @apply btn bg-ink text-white shadow-lg shadow-ink/10 hover:-translate-y-0.5 hover:bg-pine; }
+  .btn-mint { @apply btn bg-mint text-ink hover:-translate-y-0.5 hover:bg-lime-300; }
+  .btn-ghost { @apply btn border border-slate-200 bg-white text-slate-700 hover:bg-slate-50; }
+  .input { @apply w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition placeholder:text-slate-400 focus:border-pine focus:ring-4 focus:ring-pine/5; }
+  .label { @apply mb-2 block text-sm font-semibold text-slate-700; }
+  .chip { @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold; }
+}
+
+.markdown h2, .markdown h3 { margin: 1.5rem 0 .75rem; font-weight: 800; color: #0a1f1a; }
+.markdown p { margin: .8rem 0; line-height: 1.9; color: #475569; }
+.markdown li { margin: .45rem 0; color: #475569; }
+.markdown blockquote { margin: 1.25rem 0; border-left: 3px solid #b9f36a; background: #f5fbe9; padding: 1rem; color: #335048; }
+
