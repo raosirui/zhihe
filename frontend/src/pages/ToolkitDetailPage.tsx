@@ -3,7 +3,7 @@ import { ArrowLeft, ArrowRight, Bookmark, BookOpen, CheckCircle2, Clock3, Downlo
 import { Link, useNavigate, useOutletContext, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useAuth } from '../AuthContext'
-import { api, cn, money } from '../lib'
+import { api, cn, getToken, money } from '../lib'
 import type { Order, Toolkit } from '../types'
 
 export function ToolkitDetailPage() {
@@ -18,7 +18,7 @@ export function ToolkitDetailPage() {
   const start = () => { if (!user) return openAuth(); if (unlocked) navigate(`/toolkits/${item.id}/learn`); else buy() }
   const download = async () => {
     if (!user) return openAuth()
-    try { const response = await fetch(`/api/toolkits/${item.id}/download`, { headers: { Authorization: `Bearer ${localStorage.getItem('zhihe_token')}` } }); if (!response.ok) throw new Error((await response.json()).message); const blob = await response.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = item.resourceName || 'toolkit-resource'; a.click(); URL.revokeObjectURL(url) } catch (e) { toast.error((e as Error).message) }
+    try { const response = await fetch(`/api/toolkits/${item.id}/download`, { headers: { Authorization: `Bearer ${getToken()}` } }); if (!response.ok) throw new Error((await response.json().catch(() => ({}))).message || '下载失败'); const blob = await response.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = item.resourceName || 'toolkit-resource'; a.click(); URL.revokeObjectURL(url) } catch (e) { toast.error((e as Error).message) }
   }
   return <div className="pb-12">
     <div className="bg-ink text-white"><div className="mx-auto max-w-[1240px] px-4 py-6 sm:px-6 lg:px-8"><Link to="/toolkits" className="inline-flex items-center gap-2 text-sm text-white/50 hover:text-white"><ArrowLeft size={16} />返回工具库</Link><div className="mt-7 grid gap-9 pb-8 lg:grid-cols-[1.1fr_.9fr] lg:items-center">

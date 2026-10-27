@@ -9,7 +9,7 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
   const [mode, setMode] = useState<'login' | 'register'>('login')
   const [show, setShow] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [form, setForm] = useState({ username: 'researcher', password: 'User@123', nickname: '' })
+  const [form, setForm] = useState({ username: '', password: '', nickname: '' })
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true)
     try {
@@ -26,7 +26,7 @@ export function AuthModal({ open, onClose }: { open: boolean; onClose: () => voi
     <form onSubmit={submit} className="space-y-4">
       {mode === 'register' && <div><label className="label">昵称</label><input className="input" required placeholder="大家怎么称呼你" value={form.nickname} onChange={e => setForm({ ...form, nickname: e.target.value })} /></div>}
       <div><label className="label">账号</label><input className="input" required autoComplete="username" value={form.username} onChange={e => setForm({ ...form, username: e.target.value })} /></div>
-      <div><label className="label">密码</label><div className="relative"><input className="input pr-11" required minLength={6} type={show ? 'text' : 'password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /><button type="button" onClick={() => setShow(!show)} className="absolute right-3 top-3.5 text-slate-400">{show ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></div>
+      <div><label className="label">密码</label><div className="relative"><input className="input pr-11" required minLength={8} type={show ? 'text' : 'password'} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} /><button type="button" onClick={() => setShow(!show)} className="absolute right-3 top-3.5 text-slate-400">{show ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></div>
       <button disabled={busy} className="btn-mint w-full py-3.5">{busy ? '请稍候…' : mode === 'login' ? '登录' : '注册并进入'} <ArrowRight size={17} /></button>
     </form>
     <button className="mt-5 w-full text-center text-sm text-slate-500 hover:text-ink" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>{mode === 'login' ? '还没有账号？立即注册' : '已有账号？返回登录'}</button>

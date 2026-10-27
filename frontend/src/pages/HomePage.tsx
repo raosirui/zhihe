@@ -14,7 +14,9 @@ const categories = [
 
 export function HomePage() {
   const [items, setItems] = useState<Toolkit[]>([]); const [keyword, setKeyword] = useState(''); const navigate = useNavigate()
+  const [stats, setStats] = useState<{ toolkits: number; users: number }>({ toolkits: 0, users: 0 })
   useEffect(() => { api<{ items: Toolkit[] }>('/toolkits').then(x => setItems(x.items.slice(0, 6))).catch(() => {}) }, [])
+  useEffect(() => { api<{ toolkits: number; users: number }>('/stats').then(setStats).catch(() => {}) }, [])
   const search = (e: React.FormEvent) => { e.preventDefault(); navigate(`/toolkits?q=${encodeURIComponent(keyword)}`) }
   return <>
     <section className="relative overflow-hidden bg-ink text-white">
@@ -29,8 +31,8 @@ export function HomePage() {
         </div>
         <div className="relative hidden min-h-[470px] lg:block">
           <div className="absolute right-5 top-0 w-[86%] rotate-2 overflow-hidden rounded-[2rem] border border-white/10 bg-white/5 p-3 shadow-2xl backdrop-blur-xl animate-float"><img src="https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=1200&q=85" alt="科研人员" className="h-[390px] w-full rounded-[1.4rem] object-cover opacity-85" /><div className="absolute inset-x-7 bottom-7 rounded-2xl bg-ink/85 p-5 backdrop-blur-xl"><p className="text-xs text-mint">今日精选</p><p className="mt-1 font-bold">单细胞 RNA-seq 标准分析工作流</p><div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full w-3/4 rounded-full bg-mint" /></div></div></div>
-          <div className="absolute -left-3 top-24 rounded-2xl border border-white/10 bg-white/10 p-4 shadow-xl backdrop-blur-xl"><p className="text-3xl font-black text-mint">2,400+</p><p className="text-xs text-white/50">科研工作流</p></div>
-          <div className="absolute bottom-8 left-10 rounded-2xl bg-mint p-4 text-ink shadow-glow"><UsersRound size={20} /><p className="mt-2 text-xl font-black">18,600+</p><p className="text-xs opacity-60">学习者共同成长</p></div>
+          <div className="absolute -left-3 top-24 rounded-2xl border border-white/10 bg-white/10 p-4 shadow-xl backdrop-blur-xl"><p className="text-3xl font-black text-mint">{stats.toolkits.toLocaleString()}</p><p className="text-xs text-white/50">在架科研工作流</p></div>
+          <div className="absolute bottom-8 left-10 rounded-2xl bg-mint p-4 text-ink shadow-glow"><UsersRound size={20} /><p className="mt-2 text-xl font-black">{stats.users.toLocaleString()}</p><p className="text-xs opacity-60">注册研究者</p></div>
         </div>
       </div>
     </section>

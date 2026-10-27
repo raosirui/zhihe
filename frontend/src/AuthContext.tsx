@@ -25,6 +25,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => { refresh() }, [])
+  useEffect(() => {
+    const expired = () => { setToken(); setUser(null) }
+    window.addEventListener('zhihe:expired', expired)
+    return () => window.removeEventListener('zhihe:expired', expired)
+  }, [])
 
   const login = async (username: string, password: string) => {
     const result = await api<{ token: string; user: User }>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
@@ -34,7 +39,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await api<{ token: string; user: User }>('/auth/register', { method: 'POST', body: JSON.stringify({ username, password, nickname }) })
     setToken(result.token); setUser(result.user)
   }
-  const logout = () => { setToken(); setUser(null) }
+  const logout = () => {
+    if (getToken()) api('/auth/logout', { method: 'POST' }).catch(() => {})
+    setToken(); setUser(null)
+  }
   return <AuthContext.Provider value={{ user, loading, login, register, logout, refresh }}>{children}</AuthContext.Provider>
 }
 
