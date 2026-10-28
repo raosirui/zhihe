@@ -17,7 +17,7 @@ export function ToolkitCard({ item }: { item: Toolkit }) {
       <p className="mt-2 line-clamp-2 min-h-10 text-sm leading-5 text-slate-500">{item.summary}</p>
       <div className="mt-4 flex items-center justify-between border-t pt-4 text-xs text-slate-400">
         <span className="font-semibold text-slate-600">{item.author.nickname}</span>
-        <span className="flex items-center gap-3"><span><Star size={13} className="mr-1 inline fill-amber-400 text-amber-400" />{item.rating}</span><span><Download size={13} className="mr-1 inline" />{item.downloads}</span>{item.favorited && <Bookmark size={13} className="fill-pine text-pine" />}{!item.purchased && item.price > 0 && <LockKeyhole size={13} />}</span>
+        <span className="flex items-center gap-3"><span><Star size={13} className="mr-1 inline fill-amber-400 text-amber-400" />{item.rating}</span><span aria-label={`${item.downloads} 次下载`}><Download size={13} className="mr-1 inline" />{item.downloads}</span>{item.favorited && <Bookmark size={13} className="fill-pine text-pine" />}{!(item.canLearn ?? item.purchased) && item.price > 0 && <LockKeyhole size={13} />}</span>
       </div>
     </div>
   </Link>

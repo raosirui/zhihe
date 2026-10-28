@@ -1,0 +1,45 @@
+name: Isolated full acceptance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install mysqld binary without a system service
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y mysql-server-core-8.0
+          command -v mysqld
+      - name: Install backend and frontend development dependencies
+        run: |
+          python -m pip install -r backend/requirements-dev.txt
+          npm ci --prefix frontend
+      - name: Install Chromium and required browser libraries
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Run full isolated MySQL, backend, component, build and browser acceptance
+        run: python backend/acceptance_test.py

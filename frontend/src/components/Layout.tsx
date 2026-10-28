@@ -9,7 +9,7 @@ import { Logo } from './Logo'
 const nav = [{ to: '/', label: '首页', icon: Home }, { to: '/toolkits', label: '工具包', icon: LibraryBig }, { to: '/me', label: '我的', icon: UserRound }]
 
 export function Layout() {
-  const { user, logout, loading } = useAuth()
+  const { user, logout, loading, restoreError, refresh } = useAuth()
   const [authOpen, setAuthOpen] = useState(false)
   const location = useLocation(); const navigate = useNavigate()
   return <div className="min-h-screen">
@@ -35,6 +35,7 @@ export function Layout() {
         </div>
       </div>
     </header>
+    {restoreError && <div role="alert" className="border-b bg-amber-50 px-4 py-3 text-center text-sm text-amber-900">会话暂未恢复：{restoreError}<button className="btn-ghost ml-3" onClick={() => void refresh().catch(() => {})}>重试恢复</button></div>}
     <main className={cn('min-h-[calc(100vh-64px)] pb-24 md:pb-8', location.pathname === '/' && 'pb-0')}><Outlet context={{ openAuth: () => setAuthOpen(true) }} /></main>
     <div className="fixed bottom-3 left-3 right-3 z-50 grid grid-cols-3 rounded-2xl border border-white/70 bg-white/90 p-1.5 shadow-2xl backdrop-blur-xl md:hidden">
       {nav.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) => cn('flex flex-col items-center gap-1 rounded-xl py-2 text-[11px] font-semibold', isActive ? 'bg-ink text-mint' : 'text-slate-400')}><Icon size={19} />{label}</NavLink>)}

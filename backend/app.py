@@ -1,1111 +1,990 @@
+"""Zhihe HTTP API. Importing this module performs no configuration or writes.
+
+Use create_app(config_override=None). Schema/storage initialization and demo
+seeding are explicit operator actions, never factory side effects.
+"""
 import io
+import json
 import os
 import re
-import threading
-import time
 import uuid
 import zipfile
-from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
+from tempfile import TemporaryDirectory
 from functools import wraps
-from urllib.parse import quote_plus
-
-from dotenv import load_dotenv
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, Blueprint, current_app, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
-from flask_jwt_extended import (
-    JWTManager, create_access_token, get_jwt, get_jwt_identity, jwt_required
-)
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy.dialects.mysql import LONGTEXT
-from sqlalchemy.exc import SQLAlchemyError
+from flask_jwt_extended import create_access_token, jwt_required
+from sqlalchemy import select, delete, update, or_
+from sqlalchemy.orm import Session, selectinload, undefer, joinedload
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
+from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+from extensions import db, jwt
+from config import build_config
+from models import (User, Toolkit, Lesson, Favorite, Order, Purchase, WalletTransaction,
+                    WalletReceipt, LessonProgress, RevokedToken, RateLimitGuard, RateLimitBucket,
+                    FileAsset, FileReference, FileOperation, utcnow, ASSET_PATH, LESSON_ASSET_PATH)
+from security import (APIError, current_user, optional_user, optional_user_id, admin_required,
+                      request_identity, assert_identity, configure_jwt, json_object, text,
+                      positive_id, rate_hits, rate_hit, client_ip, account_rate_key)
+from access import is_manager, is_visible, can_learn, can_download
+import money_service as money
+from file_service import (UploadContext, directory, init_storage, safe_stored_name, source_asset,
+                          lock_assets, bind_reference, unbind_toolkit, referenced_asset_ids,
+                          reclaim_asset, recover_file_operations)
+from batch_kit import PROMPT_TEXT, build_skill_zip, build_template_zip, load_batch_package, ManifestError
+from validation import parse_money, CATEGORIES, LEVELS, IMAGE_EXTENSIONS, string_field, image_source
 
-from batch_kit import (
-    CATEGORIES, IMAGE_EXTENSIONS, LEVELS, PROMPT_TEXT,
-    REJECTED_RESOURCE_EXTENSIONS, ManifestError, build_skill_zip,
-    build_template_zip, load_batch_package,
-)
-
-load_dotenv()
-
-
-def utcnow():
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-app = Flask(__name__)
-db_password = quote_plus(os.getenv("MYSQL_PASSWORD", ""))
-app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
-    "DATABASE_URL",
-    f"mysql+pymysql://{os.getenv('MYSQL_USER', 'root')}:{db_password}@"
-    f"{os.getenv('MYSQL_HOST', '127.0.0.1')}:{os.getenv('MYSQL_PORT', '3306')}/"
-    f"{os.getenv('MYSQL_DATABASE', 'zhihe')}?charset=utf8mb4",
-)
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "dev-only-change-me")
-app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(days=int(os.getenv("JWT_EXPIRE_DAYS", "1")))
-# 教程配图走 <img> 加载，无法带 Authorization 头，允许 query string 携带 token
-app.config["JWT_TOKEN_LOCATION"] = ["headers", "query_string"]
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
-app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
-IMAGE_DIR = os.path.join(app.config["UPLOAD_FOLDER"], "image")
-RESOURCE_DIR = os.path.join(app.config["UPLOAD_FOLDER"], "resource")
-ASSET_DIR = os.path.join(app.config["UPLOAD_FOLDER"], "asset")  # 付费教程配图，不走公开路由
-os.makedirs(IMAGE_DIR, exist_ok=True)
-os.makedirs(RESOURCE_DIR, exist_ok=True)
-os.makedirs(ASSET_DIR, exist_ok=True)
-
-STORED_NAME_RE = re.compile(r"^[0-9a-f]{32}_[A-Za-z0-9._\-]{1,200}$")
-ASSET_PATH = "/api/uploads/"
-LESSON_ASSET_PATH = "/api/lesson-asset/"
-
-CORS(app, origins=[os.getenv("FRONTEND_ORIGIN", "http://localhost:4000")], supports_credentials=True)
-db = SQLAlchemy(app)
-jwt = JWTManager(app)
-
-long_text = lambda: db.Text().with_variant(LONGTEXT, "mysql")  # noqa: E731
-
-# 演示账号弱口令告警
+api = Blueprint("api", __name__)
 DEMO_PASSWORDS = {"admin": "Admin@123", "researcher": "User@123", "creator": "Creator@123"}
+COMMISSION_RATE = money.COMMISSION_RATE
 
 
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(50), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
-    nickname = db.Column(db.String(80), nullable=False)
-    role = db.Column(db.Enum("admin", "user"), default="user", nullable=False)
-    avatar = db.Column(db.String(500))
-    bio = db.Column(db.String(300), default="热爱探索生命科学")
-    balance = db.Column(db.Numeric(12, 2), default=0, nullable=False)
-    frozen_balance = db.Column(db.Numeric(12, 2), default=0, nullable=False)
-    created_at = db.Column(db.DateTime, default=utcnow)
+def create_app(config_override=None):
+    app = Flask(__name__, static_folder=None)
+    app.config.update(build_config(config_override))
+    db.init_app(app)
+    jwt.init_app(app)
+    configure_jwt()
+    origins = app.config["FRONTEND_ORIGIN"]
+    CORS(app, origins=origins if isinstance(origins, list) else [origins], supports_credentials=False,
+         allow_headers=["Authorization", "Content-Type", "Idempotency-Key"])
+    app.register_blueprint(api)
 
-    def public(self):
-        return {
-            "id": self.id, "username": self.username, "nickname": self.nickname,
-            "role": self.role, "avatar": self.avatar, "bio": self.bio,
-            "balance": float(self.balance or 0), "frozenBalance": float(self.frozen_balance or 0),
-            "createdAt": self.created_at.isoformat(),
-        }
+    @app.before_request
+    def validate_auth_header():
+        header_name = app.config.get("JWT_HEADER_NAME", "Authorization")
+        if header_name in request.headers:
+            value = request.headers[header_name]
+            if len(value) > 8192 or not re.fullmatch(r"Bearer [^\s,]+", value.strip()):
+                raise APIError("登录状态无效，请重新登录", 401)
 
+    @app.errorhandler(APIError)
+    def api_error(error):
+        data = {"message": error.message}
+        if error.code:
+            data["code"] = error.code
+        return jsonify(data), error.status
 
-class Toolkit(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(120), nullable=False)
-    slug = db.Column(db.String(140), unique=True, nullable=False)
-    summary = db.Column(db.String(500), nullable=False)
-    description = db.Column(long_text(), nullable=False)
-    category = db.Column(db.String(50), nullable=False)
-    level = db.Column(db.Enum("入门", "进阶", "专业"), default="入门")
-    cover = db.Column(db.String(500))
-    price = db.Column(db.Numeric(10, 2), default=0, nullable=False)
-    author_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    author = db.relationship("User", backref="toolkits")
-    status = db.Column(db.Enum("draft", "published", "offline"), default="published")
-    downloads = db.Column(db.Integer, default=0)
-    rating = db.Column(db.Numeric(3, 1), default=5.0)
-    featured = db.Column(db.Boolean, default=False)
-    tags = db.Column(db.String(300), default="")
-    resource_name = db.Column(db.String(255))
-    resource_path = db.Column(db.String(500))
-    created_at = db.Column(db.DateTime, default=utcnow)
-    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
+    @app.errorhandler(ValueError)
+    def invalid_input(error):
+        return jsonify({"message": str(error)}), 400
 
-    def serialize(self, user_id=None, detail=False, purchased_ids=None, favorited_ids=None):
-        purchased = self.price == 0
-        favorited = False
-        if user_id and (self.author_id == user_id or self.price > 0):
-            if self.author_id == user_id:
-                purchased = True
-            if not purchased:
-                if purchased_ids is not None:
-                    purchased = self.id in purchased_ids
-                else:
-                    purchased = Purchase.query.filter_by(user_id=user_id, toolkit_id=self.id).first() is not None
-            if favorited_ids is not None:
-                favorited = self.id in favorited_ids
-            else:
-                favorited = Favorite.query.filter_by(user_id=user_id, toolkit_id=self.id).first() is not None
-        data = {
-            "id": self.id, "title": self.title, "slug": self.slug, "summary": self.summary,
-            "category": self.category, "level": self.level, "cover": self.cover,
-            "price": float(self.price), "author": {"id": self.author.id, "nickname": self.author.nickname, "avatar": self.author.avatar},
-            "downloads": self.downloads, "rating": float(self.rating), "featured": self.featured,
-            "tags": [x for x in self.tags.split(",") if x], "status": self.status,
-            "purchased": purchased, "favorited": favorited, "lessonCount": len(self.lessons),
-            "createdAt": self.created_at.isoformat(),
-        }
-        if detail:
-            data.update({
-                "description": self.description,
-                "resourceName": self.resource_name,
-                "lessons": [lesson.serialize(purchased) for lesson in sorted(self.lessons, key=lambda x: x.sort_order)],
-            })
-        return data
+    @app.errorhandler(SQLAlchemyError)
+    def database_error(error):
+        db.session.rollback()
+        app.logger.error("Database request failed (%s)", type(error).__name__)
+        return jsonify({"message": "数据服务暂不可用，请稍后重试"}), 503
 
+    @app.errorhandler(OSError)
+    def storage_error(error):
+        db.session.rollback()
+        app.logger.error("Storage request failed (%s)", type(error).__name__)
+        return jsonify({"message": "文件服务暂不可用，请稍后重试"}), 503
 
-class Lesson(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    toolkit_id = db.Column(db.Integer, db.ForeignKey("toolkit.id", ondelete="CASCADE"), nullable=False)
-    toolkit = db.relationship("Toolkit", backref=db.backref("lessons", cascade="all, delete-orphan"))
-    title = db.Column(db.String(160), nullable=False)
-    content = db.Column(long_text(), nullable=False)
-    # 外链图片直接存 URL；平台上传的图片存 "file:<stored_name>"，访问需解锁校验
-    image = db.Column(db.String(500))
-    sort_order = db.Column(db.Integer, default=0)
-    duration = db.Column(db.Integer, default=10)
-    is_preview = db.Column(db.Boolean, default=False)
+    @app.errorhandler(HTTPException)
+    def http_error(error):
+        messages = {400: "请求格式不正确", 404: "接口或资源不存在", 405: "请求方法不被支持",
+                    413: "文件不能超过 100MB", 415: "请求内容类型不支持"}
+        return jsonify({"message": messages.get(error.code, "请求失败")}), error.code
 
-    def serialize(self, unlocked=False):
-        can_view = unlocked or self.is_preview
-        image = None
-        if can_view and self.image:
-            if self.image.startswith("file:"):
-                token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() if request else ""
-                image = f"{LESSON_ASSET_PATH}{self.image[5:]}" + (f"?t={token}" if token else "")
-            else:
-                image = self.image
-        return {
-            "id": self.id, "title": self.title, "sortOrder": self.sort_order,
-            "duration": self.duration, "isPreview": self.is_preview, "locked": not can_view,
-            "content": self.content if can_view else None, "image": image,
-        }
+    @app.errorhandler(Exception)
+    def unexpected_error(error):
+        db.session.rollback()
+        app.logger.error("Unexpected request failure (%s)", type(error).__name__)
+        return jsonify({"message": "服务暂不可用，请稍后重试"}), 500
 
-
-class Favorite(db.Model):
-    __table_args__ = (db.UniqueConstraint("user_id", "toolkit_id"),)
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    toolkit_id = db.Column(db.Integer, db.ForeignKey("toolkit.id"), nullable=False)
-    toolkit = db.relationship("Toolkit")
-    created_at = db.Column(db.DateTime, default=utcnow)
-
-
-class Order(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    order_no = db.Column(db.String(40), unique=True, nullable=False)
-    buyer_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    buyer = db.relationship("User", foreign_keys=[buyer_id])
-    seller_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    seller = db.relationship("User", foreign_keys=[seller_id])
-    toolkit_id = db.Column(db.Integer, db.ForeignKey("toolkit.id"), nullable=False)
-    toolkit = db.relationship("Toolkit")
-    amount = db.Column(db.Numeric(10, 2), nullable=False)
-    commission = db.Column(db.Numeric(10, 2), nullable=False)
-    status = db.Column(db.Enum("pending", "paid", "cancelled", "refunded"), default="pending")
-    paid_at = db.Column(db.DateTime)
-    created_at = db.Column(db.DateTime, default=utcnow)
-
-    def serialize(self):
-        return {
-            "id": self.id, "orderNo": self.order_no, "amount": float(self.amount),
-            "commission": float(self.commission), "status": self.status,
-            "toolkit": {"id": self.toolkit.id, "title": self.toolkit.title, "cover": self.toolkit.cover},
-            "seller": self.seller.nickname, "buyer": self.buyer.nickname,
-            "createdAt": self.created_at.isoformat(),
-            "paidAt": self.paid_at.isoformat() if self.paid_at else None,
-        }
-
-
-class Purchase(db.Model):
-    __table_args__ = (db.UniqueConstraint("user_id", "toolkit_id"),)
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    toolkit_id = db.Column(db.Integer, db.ForeignKey("toolkit.id"), nullable=False)
-    order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=False)
-    created_at = db.Column(db.DateTime, default=utcnow)
-
-
-class WalletTransaction(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    type = db.Column(db.Enum("recharge", "purchase", "commission", "withdrawal", "refund"), nullable=False)
-    amount = db.Column(db.Numeric(12, 2), nullable=False)
-    balance_after = db.Column(db.Numeric(12, 2), nullable=False)
-    note = db.Column(db.String(255))
-    order_id = db.Column(db.Integer, db.ForeignKey("order.id"))
-    created_at = db.Column(db.DateTime, default=utcnow)
-
-    def serialize(self):
-        return {"id": self.id, "type": self.type, "amount": float(self.amount), "balanceAfter": float(self.balance_after), "note": self.note, "createdAt": self.created_at.isoformat()}
-
-
-class LessonProgress(db.Model):
-    __table_args__ = (db.UniqueConstraint("user_id", "lesson_id"),)
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    lesson_id = db.Column(db.Integer, db.ForeignKey("lesson.id", ondelete="CASCADE"), nullable=False)
-    created_at = db.Column(db.DateTime, default=utcnow)
-
-
-class RevokedToken(db.Model):
-    jti = db.Column(db.String(64), primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
-    expires_at = db.Column(db.DateTime, nullable=False)
-    created_at = db.Column(db.DateTime, default=utcnow)
-
-
-@jwt.token_in_blocklist_loader
-def token_revoked(_header, payload):
-    jti = payload.get("jti")
-    if not jti:
-        return True
-    record = db.session.get(RevokedToken, jti)
-    return record is not None
-
-
-@jwt.unauthorized_loader
-def unauthorized(_reason):
-    return jsonify({"message": "请先登录"}), 401
-
-
-@jwt.invalid_token_loader
-def invalid_token(_reason):
-    return jsonify({"message": "登录状态无效，请重新登录"}), 401
-
-
-@jwt.expired_token_loader
-def expired_token(_header, _payload):
-    return jsonify({"message": "登录已过期，请重新登录"}), 401
-
-
-@jwt.revoked_token_loader
-def revoked_token(_header, _payload):
-    return jsonify({"message": "登录已失效，请重新登录"}), 401
-
-
-def current_user():
-    identity = get_jwt_identity()
-    return db.session.get(User, int(identity)) if identity else None
-
-
-def admin_required(fn):
-    @wraps(fn)
-    @jwt_required()
-    def wrapper(*args, **kwargs):
-        user = current_user()
-        if not user or user.role != "admin":
-            return jsonify({"message": "需要超级管理员权限"}), 403
-        return fn(*args, **kwargs)
-    return wrapper
-
-
-def optional_user_id():
-    try:
-        from flask_jwt_extended import verify_jwt_in_request
-        verify_jwt_in_request(optional=True)
-        identity = get_jwt_identity()
-        return int(identity) if identity else None
-    except Exception:
-        return None
-
-
-# ------------------------------------------------------------ 简易速率限制
-_rate_lock = threading.Lock()
-_rate_buckets = defaultdict(deque)
-
-
-def rate_hit(key, limit, window=60):
-    now = time.monotonic()
-    with _rate_lock:
-        bucket = _rate_buckets[key]
-        while bucket and now - bucket[0] > window:
-            bucket.popleft()
-        if len(bucket) >= limit:
-            return False
-        bucket.append(now)
-        return True
-
-
-@app.errorhandler(413)
-def too_large(_):
-    return jsonify({"message": "文件不能超过 100MB"}), 413
-
-
-@app.errorhandler(404)
-def not_found(_):
-    return jsonify({"message": "接口或资源不存在"}), 404
-
-
-@app.errorhandler(405)
-def not_allowed(_):
-    return jsonify({"message": "请求方法不被支持"}), 405
-
-
-@app.errorhandler(SQLAlchemyError)
-def db_error(error):
-    db.session.rollback()
-    app.logger.exception("database error")
-    return jsonify({"message": "数据保存失败，请检查输入内容"}), 500
-
-
-@app.after_request
-def harden_asset_responses(response):
-    if request.path.startswith((ASSET_PATH, LESSON_ASSET_PATH)):
-        # 上传文件（含 svg）一律禁止脚本执行与类型嗅探
+    @app.after_request
+    def harden_responses(response):
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
-        response.headers["Cache-Control"] = "private, max-age=3600"
-    return response
+        protected = request.path.startswith((LESSON_ASSET_PATH, "/api/auth/", "/api/wallet", "/api/me/", "/api/orders", "/api/admin/"))
+        authenticated = bool(request.headers.get("Authorization"))
+        if protected or authenticated or response.status_code >= 400:
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+        if request.path.startswith((ASSET_PATH, LESSON_ASSET_PATH)):
+            response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return response
+    return app
 
 
-# ------------------------------------------------------------ 通用工具
+def init_database():
+    """Run only inside an explicitly selected application's context."""
+    db.create_all()
 
-def safe_stored_name(stored):
-    return bool(STORED_NAME_RE.match(stored))
+
+def prune_revoked_tokens():
+    with Session(db.engine) as session, session.begin():
+        session.execute(delete(RevokedToken).where(RevokedToken.expires_at < utcnow()))
 
 
-def store_upload(kind, name, data):
-    directory = {"image": IMAGE_DIR, "asset": ASSET_DIR}.get(kind, RESOURCE_DIR)
-    stored = f"{uuid.uuid4().hex}_{secure_filename(name) or 'file'}"
-    with open(os.path.join(directory, stored), "wb") as fh:
-        fh.write(data)
-    return stored
+def _token(user):
+    return create_access_token(identity=str(user.id), additional_claims={"role": user.role, "token_version": user.token_version})
+
+
+def _purchased(session, user, toolkit_id):
+    return bool(user and session.execute(select(Purchase.id).where(Purchase.user_id == user.id,
+                                                                    Purchase.toolkit_id == toolkit_id)).first())
+
+
+def _access_toolkit(session, toolkit_id, user, detail=False):
+    stmt = select(Toolkit).where(Toolkit.id == toolkit_id)
+    if detail:
+        stmt = stmt.options(undefer(Toolkit.description), selectinload(Toolkit.lessons).undefer(Lesson.content))
+    toolkit = session.execute(stmt).scalar_one_or_none()
+    purchased = _purchased(session, user, toolkit_id) if toolkit else False
+    if not toolkit or not is_visible(toolkit, user, purchased):
+        raise APIError("工具包不存在", 404)
+    return toolkit, purchased
+
+
+def _serialize_list(items, user):
+    ids = [x.id for x in items]
+    bought = set(db.session.execute(select(Purchase.toolkit_id).where(Purchase.user_id == user.id,
+                 Purchase.toolkit_id.in_(ids))).scalars()) if user and ids else set()
+    favorites = set(db.session.execute(select(Favorite.toolkit_id).where(Favorite.user_id == user.id,
+                   Favorite.toolkit_id.in_(ids))).scalars()) if user and ids else set()
+    return [x.serialize(user.id if user else None, user=user, purchased_ids=bought, favorited_ids=favorites) for x in items]
 
 
 def toolkit_form_errors(form):
-    """单个发布与批量共用的字段校验，返回 (错误消息, 清洗后的字段)。"""
-    title = (form.get("title") or "").strip()
-    if not title:
-        return "标题不能为空", None
-    if len(title) > 120:
-        return "标题不能超过 120 字", None
-    description = (form.get("description") or "").strip()
-    if not description:
-        return "介绍不能为空", None
-    summary = (form.get("summary") or "").strip()[:500] or description[:120]
-    category = form.get("category") or "生信分析"
-    if category not in CATEGORIES:
-        return f"分类须为：{' / '.join(CATEGORIES)}", None
-    level = form.get("level") or "入门"
-    if level not in LEVELS:
-        return f"难度须为：{' / '.join(LEVELS)}", None
     try:
-        price = Decimal(str(form.get("price") or 0)).quantize(Decimal("0.01"))
-    except Exception:
-        return "定价必须是有效数字", None
-    if price < 0 or price > 9999:
-        return "定价须在 0～9999 元之间", None
-    tags = str(form.get("tags") or "").strip()[:300]
-    cover = (form.get("cover") or "").strip()[:500] or None
-    return None, {"title": title, "summary": summary, "description": description,
-                  "category": category, "level": level, "price": price, "tags": tags, "cover": cover}
+        title = string_field(form.get("title", ""), "标题", 120, True)
+        description = string_field(form.get("description", ""), "介绍", 20000, True)
+        summary = string_field(form.get("summary", ""), "摘要", 500) or description[:120]
+        category = string_field(form.get("category", "生信分析"), "分类", 50)
+        level = string_field(form.get("level", "入门"), "难度", 20)
+        if category not in CATEGORIES or level not in LEVELS:
+            raise ValueError("分类或难度无效")
+        price = parse_money(form.get("price", 0), 0, 9999, "定价")
+        tags = string_field(form.get("tags", ""), "标签", 300)
+        cover = string_field(form.get("cover", ""), "封面", 500) or None
+        return None, {"title": title, "description": description, "summary": summary,
+                      "category": category, "level": level, "price": price, "tags": tags, "cover": cover}
+    except ValueError as error:
+        return str(error), None
 
 
 def parse_lessons_json(raw):
-    import json
     try:
-        lessons = json.loads(raw or "[]")
-    except ValueError:
-        return "教程步骤 JSON 格式不正确", None
-    if not isinstance(lessons, list) or len(lessons) > 50:
-        return "教程步骤须为不超过 50 项的数组", None
-    cleaned = []
-    for index, lesson in enumerate(lessons):
-        if not isinstance(lesson, dict):
-            return f"步骤 {index + 1} 格式不正确", None
+        if raw is None or raw == "":
+            lessons = []
+        elif isinstance(raw, str):
+            if len(raw.encode("utf-8")) > 20 * 1024 * 1024:
+                raise ValueError("教程正文总量过大")
+            lessons = json.loads(raw)
+        else:
+            lessons = raw
+        if not isinstance(lessons, list) or len(lessons) > 50:
+            raise ValueError("教程步骤须为不超过 50 项的数组")
+        cleaned = []
+        total = 0
+        for index, lesson in enumerate(lessons):
+            if not isinstance(lesson, dict):
+                raise ValueError(f"步骤 {index + 1} 格式不正确")
+            title = string_field(lesson.get("title", f"步骤 {index + 1}"), "步骤标题", 160, True)
+            content = lesson.get("content", "")
+            if not isinstance(content, str) or len(content.encode("utf-8")) > 1024 * 1024:
+                raise ValueError("步骤正文须为不超过 1MB 的字符串")
+            total += len(content.encode("utf-8"))
+            if total > 20 * 1024 * 1024:
+                raise ValueError("教程正文总量过大")
+            image_value = lesson.get("image", "")
+            image = string_field("" if image_value is None else image_value, "步骤图片", 500) or None
+            duration = lesson.get("duration", 10)
+            if type(duration) is not int or not 1 <= duration <= 600:
+                raise ValueError("学习时长须为 1～600 的整数")
+            preview = lesson.get("preview", lesson.get("isPreview", index == 0))
+            if type(preview) is not bool:
+                raise ValueError("试看须为 true/false")
+            lesson_id = positive_id(lesson["id"], "步骤ID") if "id" in lesson else None
+            cleaned.append({"id": lesson_id, "title": title, "content": content, "image_url": image,
+                            "image_file": None, "duration": duration, "preview": preview})
+        return None, cleaned
+    except (ValueError, TypeError) as error:
+        return str(error), None
+
+
+def _canonical_lesson_image(value):
+    if value and value.startswith(LESSON_ASSET_PATH):
+        stored = value[len(LESSON_ASSET_PATH):]
+        if safe_stored_name(stored):
+            return "file:" + stored
+    return value
+
+
+def _prepare_item_assets(item, uploads):
+    cover = uploads.descriptor("image", item.get("cover_file"))
+    resource = uploads.descriptor("resource", item.get("resource_file"))
+    if item.get("resource_stream"):
+        stream, name = item["resource_stream"]
+        # Multipart is already streamed into Werkzeug's private spool; don't
+        # materialize it as bytes just to determine its length.
+        position = stream.tell()
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell() - position
+        stream.seek(position)
+        resource = uploads.prepare("resource", name, stream, size)
+    images = [uploads.descriptor("asset", lesson.get("image_file")) for lesson in (item["lessons"] or [])]
+    return cover, resource, images
+
+
+def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False):
+    """Single/batch shared import with a fresh transaction per item."""
+    if skip_existing:
+        # Detect existing titles before any filesystem work/quota reservation.
+        # The final check under the same owner lock handles racing new titles.
+        with Session(db.engine) as preflight, preflight.begin():
+            owner = money.lock_users(preflight, [identity.uid])[identity.uid]
+            assert_identity(preflight, owner, identity)
+            existing = preflight.execute(select(Toolkit.id).where(Toolkit.author_id == owner.id,
+                       Toolkit.title == item["title"]).order_by(Toolkit.id).limit(1)).scalar_one_or_none()
+            if existing:
+                return {"toolkitId": existing, "status": "skipped"}
+    cover, resource, images = _prepare_item_assets(item, uploads)
+    allocated = {x["id"] for x in [cover, resource, *images] if x}
+    created_id = None
+    stale_ids = []
+    try:
+        with Session(db.engine, expire_on_commit=False) as session, session.begin():
+            if toolkit_id:
+                toolkit = money.lock_toolkit(session, toolkit_id)
+                if not toolkit:
+                    raise APIError("工具包不存在", 404)
+                money.lock_orders(session, toolkit_id)
+                stale_ids = referenced_asset_ids(session, toolkit_id)
+            else:
+                toolkit = None
+            old_cover = toolkit.cover if toolkit else None
+            old_lessons = list(session.execute(select(Lesson).where(Lesson.toolkit_id == toolkit_id)
+                               .options(undefer(Lesson.content)).order_by(Lesson.sort_order, Lesson.id)
+                               .execution_options(populate_existing=True)).scalars()) if toolkit else []
+            owner = money.lock_users(session, [identity.uid])[identity.uid]
+            assert_identity(session, owner, identity)
+            if toolkit and not is_manager(toolkit, owner):
+                raise APIError("只能编辑自己发布的工具包", 403)
+            if toolkit and "_partial_fields" in item:
+                merged = {field: getattr(toolkit, field) for field in
+                          ["title", "summary", "description", "category", "level", "price", "tags", "cover"]}
+                merged["cover"] = merged["cover"] or ""
+                merged.update(item["_partial_fields"])
+                if merged.get("cover") is None:
+                    merged["cover"] = ""
+                error, fields = toolkit_form_errors(merged)
+                if error:
+                    raise APIError(error)
+                item.update(fields)
+                item["cover_url"] = fields["cover"]
+            if item["lessons"] is None:
+                item["lessons"] = [{"id": lesson.id, "title": lesson.title, "content": lesson.content,
+                                    "image_url": lesson.image, "image_file": None, "duration": lesson.duration,
+                                    "preview": lesson.is_preview} for lesson in old_lessons]
+                images = [None] * len(old_lessons)
+            if skip_existing:
+                # Owner lock is a stable synchronization point for this
+                # author's batch duplicate-title check (non-financial path).
+                existing = session.execute(select(Toolkit.id).where(Toolkit.author_id == owner.id,
+                           Toolkit.title == item["title"]).order_by(Toolkit.id).limit(1)).scalar_one_or_none()
+                if existing:
+                    return {"toolkitId": existing, "status": "skipped"}
+            if not toolkit:
+                toolkit = Toolkit(slug=f"{uuid.uuid4().hex[:12]}-{secure_filename(item['title'])[:50] or 'toolkit'}",
+                                  author_id=owner.id, status="published", featured=False)
+                session.add(toolkit)
+            for field in ["title", "summary", "description", "category", "level", "price", "tags"]:
+                setattr(toolkit, field, item[field])
+            session.flush()
+            created_id = toolkit.id
+            cover_url = ASSET_PATH + cover["stored_name"] if cover else item.get("cover_url")
+            preserve_cover = bool(toolkit_id and not cover and cover_url == old_cover)
+            cover_id = cover["id"] if cover else source_asset(session, cover_url, identity, "cover", preserve_unknown=preserve_cover)
+            lesson_ids, kept_ids = [], set()
+            old_by_id = {lesson.id: lesson for lesson in old_lessons}
+            for index, (lesson, prepared) in enumerate(zip(item["lessons"], images)):
+                previous = old_by_id.get(lesson["id"]) if lesson.get("id") else (
+                    old_lessons[index] if index < len(old_lessons) else None)
+                if lesson.get("id") and previous is None:
+                    raise APIError("步骤ID不属于此工具包")
+                if previous:
+                    if previous.id in kept_ids:
+                        raise APIError("步骤ID不能重复")
+                    kept_ids.add(previous.id)
+                url = "file:" + prepared["stored_name"] if prepared else _canonical_lesson_image(lesson.get("image_url"))
+                # Preservation is scoped to this exact prior Lesson, never a
+                # toolkit-wide set of private images or another toolkit's ID.
+                preserved = bool(previous and not prepared and url == _canonical_lesson_image(previous.image))
+                asset_id = prepared["id"] if prepared else source_asset(session, url, identity, "lesson", preserve_unknown=preserved)
+                lesson_ids.append((url, asset_id, previous, preserved))
+            asset_ids = [x for x in [cover_id, resource["id"] if resource else None, *[x[1] for x in lesson_ids], *stale_ids] if x]
+            assets = lock_assets(session, asset_ids)
+            if toolkit_id:
+                unbind_toolkit(session, toolkit.id, {asset_id: assets[asset_id] for asset_id in set(stale_ids)})
+                removed_ids = set(old_by_id) - kept_ids
+                if removed_ids:
+                    session.execute(delete(LessonProgress).where(LessonProgress.lesson_id.in_(removed_ids)))
+                    session.execute(delete(Lesson).where(Lesson.id.in_(removed_ids)))
+            toolkit.cover = cover_url
+            if cover_id:
+                bind_reference(session, assets[cover_id], identity, toolkit.id, "cover", preserve=preserve_cover)
+            if resource:
+                toolkit.resource_name, toolkit.resource_path = resource["name"], resource["stored_name"]
+                bind_reference(session, assets[resource["id"]], identity, toolkit.id, "resource")
+            elif toolkit_id:
+                # Existing resource is unchanged when edit has no replacement.
+                # Restore its registry binding rather than lose ownership.
+                if toolkit.resource_path:
+                    retained = next((x for x in assets.values() if x.stored_name == toolkit.resource_path), None)
+                    if retained:
+                        bind_reference(session, retained, identity, toolkit.id, "resource", preserve=True)
+            for index, (data, (url, asset_id, previous, preserved_image)) in enumerate(zip(item["lessons"], lesson_ids)):
+                # Platform images always use the protected policy route. Public
+                # shared images keep their underlying image-directory purpose.
+                if asset_id:
+                    url = "file:" + assets[asset_id].stored_name
+                lesson = previous or Lesson(toolkit_id=toolkit.id)
+                lesson.title, lesson.content, lesson.image = data["title"], data["content"], url
+                lesson.duration, lesson.sort_order, lesson.is_preview = data["duration"], index, data["preview"]
+                session.add(lesson)
+                session.flush()
+                if asset_id:
+                    bind_reference(session, assets[asset_id], identity, toolkit.id, "lesson", lesson.id, preserve=preserved_image)
+            session.flush()
+        # Query with the normal request session only after independent commit.
+        db.session.rollback()  # Discard the JWT request's earlier RR snapshot.
+        toolkit = db.session.execute(select(Toolkit).where(Toolkit.id == created_id).options(
+                  undefer(Toolkit.description), selectinload(Toolkit.lessons).undefer(Lesson.content))).scalar_one()
+        result = toolkit.serialize(identity.uid, detail=True)
+    except Exception:
+        # An acknowledgement failure can happen after COMMIT. Check using a
+        # NEW connection, not the rolled-back/stale request snapshot.
+        confirmed = False
+        if created_id and not toolkit_id:
+            try:
+                with Session(db.engine) as check:
+                    confirmed = check.execute(select(Toolkit.id).where(Toolkit.id == created_id,
+                                Toolkit.author_id == identity.uid)).scalar_one_or_none() is not None
+            except SQLAlchemyError:
+                pass
+        if confirmed:
+            db.session.rollback()
+            toolkit = db.session.get(Toolkit, created_id)
+            result = toolkit.serialize(identity.uid, detail=True)
+        else:
+            uploads.resolve_failure(allocated)
+            raise
+    for asset_id in sorted(set(stale_ids)):
         try:
-            duration = int(lesson.get("duration", 10))
-        except (TypeError, ValueError):
-            return f"步骤 {index + 1} 的学习时长无效", None
-        cleaned.append({
-            "title": (lesson.get("title") or f"步骤 {index + 1}")[:160],
-            "content": str(lesson.get("content") or ""),
-            "image": (str(lesson.get("image"))[:500] if lesson.get("image") else None),
-            "duration": max(1, min(600, duration)),
-        })
-    return None, cleaned
+            reclaim_asset(asset_id)
+        except Exception:
+            current_app.logger.warning("Committed old-file cleanup deferred for asset %s", asset_id)
+    return result
 
 
-# ------------------------------------------------------------ 认证
-
-@app.get("/api/health")
+@api.get("/api/health")
 def health():
     return jsonify({"status": "ok", "service": "zhihe-api"})
 
 
-@app.get("/api/stats")
+@api.get("/api/stats")
 def public_stats():
-    return jsonify({
-        "toolkits": Toolkit.query.filter_by(status="published").count(),
-        "users": User.query.count(),
-    })
+    return jsonify({"toolkits": Toolkit.query.filter_by(status="published").count(), "users": User.query.count()})
 
 
-@app.post("/api/auth/login")
+@api.post("/api/auth/login")
 def login():
-    data = request.get_json() or {}
-    username = (data.get("username") or "").strip()
-    if not rate_hit(f"login|{request.remote_addr}|{username}", 8):
-        return jsonify({"message": "尝试次数过多，请 1 分钟后再试"}), 429
+    data = json_object()
+    username = text(data.get("username", ""), "账号", 50, 1)
+    password = text(data.get("password", ""), "密码", 128, 1, strip=False)
+    ip = client_ip()
+    try:
+        account = account_rate_key(username)
+    except SQLAlchemyError:
+        raise APIError("认证服务暂不可用", 503)
+    rate_hits([(f"login:ip:{ip}", 30, 60), (f"login:account:{account}", 8, 60),
+               (f"login:ip:{ip}", 100, 600), (f"login:account:{account}", 30, 600)])
     user = User.query.filter_by(username=username).first()
-    if not user or not check_password_hash(user.password_hash, data.get("password", "")):
-        return jsonify({"message": "账号或密码不正确"}), 401
-    token = create_access_token(identity=str(user.id), additional_claims={"role": user.role})
-    return jsonify({"token": token, "user": user.public()})
+    if not user or not check_password_hash(user.password_hash, password):
+        raise APIError("账号或密码不正确", 401)
+    return jsonify({"token": _token(user), "user": user.public()})
 
 
-@app.post("/api/auth/register")
+@api.post("/api/auth/register")
 def register():
-    data = request.get_json() or {}
-    if not rate_hit(f"register|{request.remote_addr}", 5):
-        return jsonify({"message": "注册过于频繁，请稍后再试"}), 429
-    username = (data.get("username") or "").strip()
-    password = data.get("password") or ""
-    nickname = (data.get("nickname") or "").strip() or username
-    if len(username) < 3 or len(username) > 50 or not re.fullmatch(r"[\w.\-·]+", username):
-        return jsonify({"message": "账号需为 3～50 位字母、数字或 _.- 字符"}), 400
-    if len(password) < 8:
-        return jsonify({"message": "密码至少 8 位"}), 400
-    if len(nickname) > 80:
-        return jsonify({"message": "昵称不能超过 80 字"}), 400
-    if User.query.filter_by(username=username).first():
-        return jsonify({"message": "账号已存在"}), 409
-    user = User(username=username, nickname=nickname,
-                password_hash=generate_password_hash(password), role="user")
-    db.session.add(user)
-    db.session.commit()
-    token = create_access_token(identity=str(user.id), additional_claims={"role": user.role})
-    return jsonify({"token": token, "user": user.public()}), 201
+    data = json_object()
+    username = text(data.get("username", ""), "账号", 50, 3)
+    password = text(data.get("password", ""), "密码", 128, 8, strip=False)
+    nickname = text(data.get("nickname", username), "昵称", 80, 1)
+    if not re.fullmatch(r"[\w.\-·]+", username):
+        raise APIError("账号需为 3～50 位字母、数字或 _.- 字符")
+    ip = client_ip()
+    rate_hits([(f"register:{ip}", 5, 60), (f"register:{ip}", 20, 600)])
+    try:
+        with Session(db.engine, expire_on_commit=False) as session, session.begin():
+            if session.execute(select(User.id).where(User.username == username)).first():
+                raise APIError("账号已存在", 409)
+            user = User(username=username, nickname=nickname, password_hash=generate_password_hash(password), role="user")
+            session.add(user)
+            session.flush()
+            result, token = user.public(), _token(user)
+    except IntegrityError:
+        raise APIError("账号已存在", 409) from None
+    return jsonify({"token": token, "user": result}), 201
 
 
-@app.get("/api/auth/me")
+@api.get("/api/auth/me")
 @jwt_required()
 def me():
     return jsonify(current_user().public())
 
 
-def revoke_current_token():
-    payload = get_jwt()
-    jti = payload.get("jti")
-    if jti and db.session.get(RevokedToken, jti) is None:
-        expires_at = datetime.fromtimestamp(payload["exp"], timezone.utc).replace(tzinfo=None)
-        db.session.add(RevokedToken(jti=jti, user_id=int(get_jwt_identity()), expires_at=expires_at))
-
-
-@app.post("/api/auth/logout")
+@api.post("/api/auth/logout")
 @jwt_required()
 def logout():
-    revoke_current_token()
-    db.session.commit()
+    identity = request_identity()
+    with Session(db.engine) as session, session.begin():
+        user = money.lock_users(session, [identity.uid])[identity.uid]
+        assert_identity(session, user, identity)
+        if session.get(RevokedToken, identity.jti) is None:
+            session.add(RevokedToken(jti=identity.jti, user_id=user.id, expires_at=identity.expires_at))
     return jsonify({"message": "已退出登录"})
 
 
-@app.put("/api/auth/password")
+@api.put("/api/auth/password")
 @jwt_required()
 def change_password():
-    data = request.get_json() or {}
-    user = current_user()
-    if not check_password_hash(user.password_hash, data.get("oldPassword", "")):
-        return jsonify({"message": "原密码不正确"}), 400
-    new_password = data.get("newPassword") or ""
-    if len(new_password) < 8:
-        return jsonify({"message": "新密码至少 8 位"}), 400
-    user.password_hash = generate_password_hash(new_password)
-    revoke_current_token()  # 改密后强制重新登录
-    db.session.commit()
+    data = json_object()
+    old = text(data.get("oldPassword", ""), "原密码", 128, 1, strip=False)
+    new = text(data.get("newPassword", ""), "新密码", 128, 8, strip=False)
+    identity = request_identity()
+    with Session(db.engine) as session, session.begin():
+        user = money.lock_users(session, [identity.uid])[identity.uid]
+        assert_identity(session, user, identity)
+        if not check_password_hash(user.password_hash, old):
+            raise APIError("原密码不正确")
+        user.password_hash = generate_password_hash(new)
+        user.token_version += 1
+        session.add(RevokedToken(jti=identity.jti, user_id=user.id, expires_at=identity.expires_at))
     return jsonify({"message": "密码已修改，请重新登录"})
 
 
-# ------------------------------------------------------------ 工具包
-
-@app.get("/api/toolkits")
+@api.get("/api/toolkits")
 def list_toolkits():
-    user_id = optional_user_id()
+    user = optional_user()
     query = Toolkit.query.filter(Toolkit.status == "published")
-    keyword = request.args.get("q", "").strip()
+    keyword = text(request.args.get("q", ""), "关键词", 120)
     if keyword:
         like = f"%{keyword}%"
-        query = query.filter(db.or_(Toolkit.title.like(like), Toolkit.summary.like(like), Toolkit.tags.like(like)))
+        query = query.filter(or_(Toolkit.title.like(like), Toolkit.summary.like(like), Toolkit.tags.like(like)))
     category = request.args.get("category")
     if category and category != "全部":
+        if category not in CATEGORIES:
+            raise APIError("分类无效")
         query = query.filter_by(category=category)
     price = request.args.get("price")
+    if price not in {None, "all", "free", "paid"}:
+        raise APIError("价格筛选无效")
     if price == "free":
         query = query.filter(Toolkit.price == 0)
-    if price == "paid":
+    elif price == "paid":
         query = query.filter(Toolkit.price > 0)
     sort = request.args.get("sort", "recommended")
-    if sort == "newest":
-        query = query.order_by(Toolkit.created_at.desc())
-    elif sort == "popular":
-        query = query.order_by(Toolkit.downloads.desc())
-    elif sort == "price":
-        query = query.order_by(Toolkit.price.asc())
-    else:
-        query = query.order_by(Toolkit.featured.desc(), Toolkit.downloads.desc())
+    sorts = {"recommended": (Toolkit.featured.desc(), Toolkit.downloads.desc()), "newest": (Toolkit.created_at.desc(),),
+             "popular": (Toolkit.downloads.desc(),), "price": (Toolkit.price.asc(),)}
+    if sort not in sorts:
+        raise APIError("排序方式无效")
+    query = query.order_by(*sorts[sort], Toolkit.id)
     try:
-        page = max(1, int(request.args.get("page", 1)))
-        per_page = min(100, max(1, int(request.args.get("per_page", 60))))
+        page, per_page = int(request.args.get("page", 1)), int(request.args.get("per_page", 60))
     except ValueError:
-        page, per_page = 1, 60
+        raise APIError("页码无效") from None
+    if not 1 <= page <= 100000 or not 1 <= per_page <= 100:
+        raise APIError("页码或每页数量无效")
     pagination = query.paginate(page=page, per_page=per_page, error_out=False)
-    items = pagination.items
-    purchased_ids = favorited_ids = None
-    if user_id:
-        ids = [t.id for t in items]
-        purchased_ids = {p.toolkit_id for p in Purchase.query.filter(
-            Purchase.user_id == user_id, Purchase.toolkit_id.in_(ids)).all()} if ids else set()
-        favorited_ids = {f.toolkit_id for f in Favorite.query.filter(
-            Favorite.user_id == user_id, Favorite.toolkit_id.in_(ids)).all()} if ids else set()
-        purchased_ids |= {t.id for t in items if t.author_id == user_id}
-    return jsonify({
-        "items": [x.serialize(user_id, purchased_ids=purchased_ids, favorited_ids=favorited_ids) for x in items],
-        "total": pagination.total, "page": page, "pages": pagination.pages,
-    })
+    return jsonify({"items": _serialize_list(pagination.items, user), "total": pagination.total,
+                    "page": page, "pages": pagination.pages})
 
 
-@app.get("/api/toolkits/<int:toolkit_id>")
+@api.get("/api/toolkits/<int:toolkit_id>")
 def get_toolkit(toolkit_id):
-    toolkit = db.session.get(Toolkit, toolkit_id)
-    user_id = optional_user_id()
-    if toolkit and toolkit.status != "published" and user_id:
-        user = db.session.get(User, user_id)
-        if user and (user.role == "admin" or toolkit.author_id == user_id):
-            return jsonify(toolkit.serialize(user_id, detail=True))
-    if not toolkit or toolkit.status != "published":
-        return jsonify({"message": "工具包不存在"}), 404
-    return jsonify(toolkit.serialize(user_id, detail=True))
+    user = optional_user()
+    toolkit, purchased = _access_toolkit(db.session, toolkit_id, user, detail=True)
+    return jsonify(toolkit.serialize(user.id if user else None, detail=True, user=user,
+                                    purchased_ids={toolkit_id} if purchased else set()))
 
 
-@app.post("/api/toolkits")
+def _single_item(partial=False):
+    data = json_object() if request.is_json else request.form
+    if partial:
+        fields = {"_partial_fields": dict(data), "cover_url": None}
+    else:
+        error, fields = toolkit_form_errors(data)
+        if error:
+            raise APIError(error)
+        fields["cover_url"] = fields["cover"]
+    error, lessons = parse_lessons_json(data.get("lessons"))
+    if error:
+        raise APIError(error)
+    if partial and "lessons" not in data:
+        lessons = None
+    resource = request.files.get("resource")
+    return {**fields, "cover_file": None, "resource_file": None,
+            "resource_stream": (resource.stream, resource.filename) if resource and resource.filename else None,
+            "lessons": lessons}
+
+
+@api.post("/api/toolkits")
 @jwt_required()
 def create_toolkit():
-    user = current_user()
-    data = request.form
-    error, fields = toolkit_form_errors(data)
-    if error:
-        return jsonify({"message": error}), 400
-    lessons_error, lessons = parse_lessons_json(data.get("lessons"))
-    if lessons_error:
-        return jsonify({"message": lessons_error}), 400
-    for lesson in lessons:
-        image = lesson["image"]
-        if image and not image.startswith(("http://", "https://", "/api/uploads/")):
-            return jsonify({"message": f"步骤图片地址无效：{image[:60]}"}), 400
-    resource_file = request.files.get("resource")
-    if resource_file and resource_file.filename:
-        suffix = os.path.splitext(resource_file.filename)[1].lower()
-        if suffix in REJECTED_RESOURCE_EXTENSIONS:
-            return jsonify({"message": f"不支持上传 {suffix} 类型的资源文件"}), 400
-    slug = f"{uuid.uuid4().hex[:8]}-{secure_filename(fields['title'])[:50] or 'toolkit'}"
-    toolkit = Toolkit(
-        title=fields["title"], slug=slug, summary=fields["summary"], description=fields["description"],
-        category=fields["category"], level=fields["level"], price=fields["price"],
-        author_id=user.id, tags=fields["tags"], cover=fields["cover"] or None, status="published",
-    )
-    if resource_file and resource_file.filename:
-        filename = store_upload("resource", resource_file.filename, resource_file.read())
-        toolkit.resource_name, toolkit.resource_path = secure_filename(resource_file.filename) or "resource", filename
-    db.session.add(toolkit)
-    db.session.flush()
-    for index, lesson in enumerate(lessons):
-        db.session.add(Lesson(
-            toolkit_id=toolkit.id, title=lesson["title"], content=lesson["content"],
-            image=lesson["image"], duration=lesson["duration"], sort_order=index,
-            is_preview=index == 0,
-        ))
-    db.session.commit()
-    return jsonify(toolkit.serialize(user.id, detail=True)), 201
+    item, identity = _single_item(), request_identity()
+    context = UploadContext(identity)
+    try:
+        result = _persist_item(item, identity, context)
+    except Exception:
+        context.resolve_failure()
+        raise
+    return jsonify(result), 201
 
 
-@app.put("/api/toolkits/<int:toolkit_id>/status")
+@api.put("/api/toolkits/<int:toolkit_id>")
+@jwt_required()
+def edit_toolkit(toolkit_id):
+    item, identity = _single_item(partial=True), request_identity()
+    context = UploadContext(identity)
+    try:
+        result = _persist_item(item, identity, context, toolkit_id=toolkit_id)
+    except Exception:
+        context.resolve_failure()
+        raise
+    return jsonify(result)
+
+
+def _manage_locked(session, toolkit_id, identity):
+    toolkit = money.lock_toolkit(session, toolkit_id)
+    if not toolkit:
+        raise APIError("工具包不存在", 404)
+    orders = money.lock_orders(session, toolkit_id)
+    user = money.lock_users(session, [identity.uid])[identity.uid]
+    assert_identity(session, user, identity)
+    if not is_manager(toolkit, user):
+        raise APIError("只能管理自己发布的工具包", 403)
+    return toolkit, orders, user
+
+
+@api.put("/api/toolkits/<int:toolkit_id>/status")
 @jwt_required()
 def update_status(toolkit_id):
-    user = current_user()
-    toolkit = db.session.get(Toolkit, toolkit_id)
-    if not toolkit:
-        return jsonify({"message": "工具包不存在"}), 404
-    status = (request.get_json() or {}).get("status")
-    if status not in ("published", "offline"):
-        return jsonify({"message": "状态无效"}), 400
-    if user.role == "admin":
-        pass
-    elif toolkit.author_id == user.id:
-        if status != "offline":
-            return jsonify({"message": "作者只能下架自己的工具包"}), 403
-    else:
-        return jsonify({"message": "需要超级管理员权限"}), 403
-    toolkit.status = status
-    db.session.commit()
-    return jsonify(toolkit.serialize(user.id))
+    status = json_object().get("status")
+    if not isinstance(status, str) or status not in {"published", "offline"}:
+        raise APIError("状态无效")
+    identity = request_identity()
+    with Session(db.engine, expire_on_commit=False) as session, session.begin():
+        toolkit, _, user = _manage_locked(session, toolkit_id, identity)
+        if user.role != "admin" and status != "offline":
+            raise APIError("作者只能下架自己的工具包", 403)
+        toolkit.status = status
+        session.flush()
+        result = toolkit.serialize(user.id, user=user)
+    return jsonify(result)
 
 
-@app.delete("/api/toolkits/<int:toolkit_id>")
+@api.delete("/api/toolkits/<int:toolkit_id>")
 @jwt_required()
 def delete_toolkit(toolkit_id):
-    user = current_user()
-    toolkit = db.session.get(Toolkit, toolkit_id)
-    if not toolkit:
-        return jsonify({"message": "工具包不存在"}), 404
-    if user.role != "admin" and toolkit.author_id != user.id:
-        return jsonify({"message": "只能删除自己发布的工具包"}), 403
-    referenced = Order.query.filter_by(toolkit_id=toolkit_id).first()
-    if referenced:
-        toolkit.status = "offline"
-        db.session.commit()
-        return jsonify({"message": "该工具包存在订单记录，已改为下架", "mode": "offline"})
-    lesson_ids = [x.id for x in Lesson.query.filter_by(toolkit_id=toolkit_id).all()]
-    if lesson_ids:
-        LessonProgress.query.filter(LessonProgress.lesson_id.in_(lesson_ids)).delete(synchronize_session=False)
-    Favorite.query.filter_by(toolkit_id=toolkit_id).delete(synchronize_session=False)
-    for stored, directory in ((toolkit.resource_path, RESOURCE_DIR),
-                              (toolkit.cover.replace(ASSET_PATH, "") if (toolkit.cover or "").startswith(ASSET_PATH) else None, IMAGE_DIR)):
-        if stored and safe_stored_name(stored):
-            try:
-                os.remove(os.path.join(directory, stored))
-            except OSError:
-                pass
-    for lesson in list(toolkit.lessons):
-        if (lesson.image or "").startswith("file:"):
-            stored = lesson.image[5:]
-            if safe_stored_name(stored):
-                try:
-                    os.remove(os.path.join(ASSET_DIR, stored))
-                except OSError:
-                    pass
-    db.session.delete(toolkit)
-    db.session.commit()
-    return jsonify({"message": "工具包已删除", "mode": "deleted"})
+    identity = request_identity()
+    asset_ids = []
+    with Session(db.engine) as session, session.begin():
+        toolkit, orders, user = _manage_locked(session, toolkit_id, identity)
+        purchase = session.execute(select(Purchase.id).where(Purchase.toolkit_id == toolkit_id).with_for_update()).first()
+        if orders or purchase:
+            toolkit.status = "offline"
+            result = {"message": "该工具包存在订单或购买记录，已改为下架", "mode": "offline"}
+        else:
+            asset_ids = referenced_asset_ids(session, toolkit_id)
+            assets = lock_assets(session, asset_ids)
+            unbind_toolkit(session, toolkit_id, assets)
+            lesson_ids = list(session.execute(select(Lesson.id).where(Lesson.toolkit_id == toolkit_id)).scalars())
+            if lesson_ids:
+                session.execute(delete(LessonProgress).where(LessonProgress.lesson_id.in_(lesson_ids)))
+            session.execute(delete(Favorite).where(Favorite.toolkit_id == toolkit_id))
+            session.execute(delete(Lesson).where(Lesson.toolkit_id == toolkit_id))
+            session.delete(toolkit)
+            result = {"message": "工具包已删除", "mode": "deleted"}
+    for asset_id in sorted(set(asset_ids)):
+        try:
+            reclaim_asset(asset_id)
+        except Exception:
+            current_app.logger.warning("Committed file cleanup deferred for asset %s", asset_id)
+    return jsonify(result)
 
 
-# ------------------------------------------------------------ 静态资源与付费配图
-
-@app.get("/api/uploads/<stored>")
+@api.get("/api/uploads/<stored>")
 def uploaded_cover(stored):
+    optional_user()  # Invalid optional credentials still fail, even on public URLs.
     if not safe_stored_name(stored) or os.path.splitext(stored)[1].lower() not in IMAGE_EXTENSIONS:
-        return jsonify({"message": "资源不存在"}), 404
-    return send_from_directory(IMAGE_DIR, stored)
+        raise APIError("资源不存在", 404)
+    asset = db.session.execute(select(FileAsset).where(FileAsset.stored_name == stored)).scalar_one_or_none()
+    if asset:
+        if asset.purpose != "image" or not asset.is_public or asset.state not in {"active", "legacy", "retained"}:
+            raise APIError("资源不存在", 404)
+        public_ref = db.session.execute(select(FileReference.id).join(Toolkit, FileReference.toolkit_id == Toolkit.id)
+                     .where(FileReference.asset_id == asset.id, FileReference.usage == "cover", Toolkit.status == "published")).first()
+        legacy_ref = db.session.execute(select(Toolkit.id).where(Toolkit.cover == ASSET_PATH + stored, Toolkit.status == "published")).first()
+        if not public_ref and not legacy_ref:
+            raise APIError("资源不存在", 404)
+    else:
+        # No registry means no reliable public/private purpose classification.
+        # Explicit migration can register historical public covers safely.
+        raise APIError("资源不存在", 404)
+    return send_from_directory(directory("image"), stored)
 
 
-@app.get("/api/lesson-asset/<stored>")
+@api.get("/api/lesson-asset/<stored>")
 def lesson_asset(stored):
+    user = optional_user()
     if not safe_stored_name(stored) or os.path.splitext(stored)[1].lower() not in IMAGE_EXTENSIONS:
-        return jsonify({"message": "资源不存在"}), 404
-    lesson = Lesson.query.filter_by(image=f"file:{stored}").first()
-    if not lesson:
-        return jsonify({"message": "资源不存在"}), 404
-    toolkit = lesson.toolkit
-    if lesson.is_preview or toolkit.price == 0:
-        return send_from_directory(IMAGE_DIR, stored)
-    user_id = optional_user_id()
-    if not user_id:
-        return jsonify({"message": "请先登录"}), 401
-    user = db.session.get(User, user_id)
-    unlocked = (toolkit.author_id == user_id or user.role == "admin"
-                or Purchase.query.filter_by(user_id=user_id, toolkit_id=toolkit.id).first() is not None)
-    if not unlocked:
-        return jsonify({"message": "购买后方可查看"}), 403
-    return send_from_directory(ASSET_DIR, stored)
+        raise APIError("资源不存在", 404)
+    lessons = db.session.execute(select(Lesson).where(Lesson.image == "file:" + stored).order_by(Lesson.id)).scalars()
+    allowed, visible = False, False
+    for lesson in lessons:
+        toolkit = lesson.toolkit
+        purchased = _purchased(db.session, user, toolkit.id)
+        if is_visible(toolkit, user, purchased):
+            visible = True
+            if can_learn(toolkit, user, purchased, lesson):
+                allowed = True
+                break
+    if not allowed:
+        if not visible:
+            raise APIError("资源不存在", 404)
+        raise APIError("购买后方可查看", 403)
+    asset = db.session.execute(select(FileAsset).where(FileAsset.stored_name == stored)).scalar_one_or_none()
+    kind = asset.purpose if asset else "asset"
+    if kind not in {"asset", "image"} or (asset and asset.state not in {"active", "legacy", "retained"}):
+        raise APIError("资源不存在", 404)
+    return send_from_directory(directory(kind), stored)
 
 
-# ------------------------------------------------------------ 批量上传
-
-@app.get("/api/batch/template")
+@api.get("/api/batch/template")
 def batch_template():
-    return send_file(build_template_zip(), mimetype="application/zip",
-                     as_attachment=True, download_name="zhihe-standard-template.zip")
+    return send_file(build_template_zip(), mimetype="application/zip", as_attachment=True, download_name="zhihe-standard-template.zip")
 
 
-@app.get("/api/batch/skill")
+@api.get("/api/batch/skill")
 def batch_skill():
-    return send_file(build_skill_zip(), mimetype="application/zip",
-                     as_attachment=True, download_name="zhihe-toolkit-converter-skill.zip")
+    return send_file(build_skill_zip(), mimetype="application/zip", as_attachment=True, download_name="zhihe-toolkit-converter-skill.zip")
 
 
-@app.get("/api/batch/prompt")
+@api.get("/api/batch/prompt")
 def batch_prompt():
     return jsonify({"text": PROMPT_TEXT})
 
 
-@app.post("/api/batch/upload")
+@api.post("/api/batch/upload")
 @jwt_required()
 def batch_upload():
-    user = current_user()
-    if not rate_hit(f"batch|{user.id}", 10, window=600):
-        return jsonify({"message": "批量上传过于频繁，请稍后再试"}), 429
+    identity = request_identity()
+    rate_hits([(f"batch:user:{identity.uid}", 10, 600), (f"batch:ip:{client_ip()}", 20, 600)])
     file = request.files.get("package")
     if not file:
-        return jsonify({"message": "请选择要上传的 ZIP 文件"}), 400
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(file.read()))
-    except zipfile.BadZipFile:
-        return jsonify({"message": "文件不是有效的 ZIP 压缩包"}), 400
-    with zf:
+        raise APIError("请选择要上传的 ZIP 文件")
+    results = []
+    uploads = UploadContext(identity)
+    # Do not file.read()/BytesIO the ZIP. Its private upload stream and all
+    # extracted descriptors stay alive throughout every independent import.
+    with TemporaryDirectory(prefix="zhihe-batch-") as staging:
         try:
-            items, errors = load_batch_package(zf)
-        except ManifestError as exc:
-            return jsonify({"message": str(exc)}), 400
-    results = list(errors)
-    for item in items:
-        existing = Toolkit.query.filter_by(author_id=user.id, title=item["title"]).first()
-        if existing:
-            results.append({"index": item["index"], "title": item["title"], "status": "skipped",
-                            "toolkitId": existing.id, "error": "已有同名工具包，已跳过"})
-            continue
-        try:
-            slug = f"{uuid.uuid4().hex[:8]}-{secure_filename(item['title'])[:50] or 'toolkit'}"
-            cover = item["cover_url"]
-            if item["cover_bytes"] is not None:
-                cover = f"{ASSET_PATH}{store_upload('image', item['cover_name'], item['cover_bytes'])}"
-            toolkit = Toolkit(
-                title=item["title"], slug=slug, summary=item["summary"], description=item["description"],
-                category=item["category"], level=item["level"], price=item["price"],
-                author_id=user.id, tags=item["tags"],
-                featured=False,  # 推荐位仅管理员可设置
-                cover=cover, status="published",
-            )
-            if item["resource_bytes"] is not None:
-                toolkit.resource_name = item["resource_name"]
-                toolkit.resource_path = store_upload("resource", item["resource_name"], item["resource_bytes"])
-            db.session.add(toolkit)
-            db.session.flush()
-            for index, lesson in enumerate(item["lessons"]):
-                image = lesson["image_url"]
-                if lesson["image_bytes"] is not None:
-                    image = f"file:{store_upload('asset', lesson['image_name'], lesson['image_bytes'])}"
-                db.session.add(Lesson(
-                    toolkit_id=toolkit.id, title=lesson["title"], content=lesson["content"],
-                    image=image, duration=lesson["duration"], sort_order=index, is_preview=lesson["preview"],
-                ))
-            db.session.commit()
-            results.append({"index": item["index"], "title": item["title"], "status": "created",
-                            "toolkitId": toolkit.id, "lessonCount": len(item["lessons"])})
-        except SQLAlchemyError as exc:
-            db.session.rollback()
-            results.append({"index": item["index"], "title": item["title"], "status": "failed",
-                            "error": f"创建失败：{type(exc).__name__}"})
+            with zipfile.ZipFile(file.stream) as zf:
+                items, errors = load_batch_package(zf, staging)
+        except (zipfile.BadZipFile, ValueError, RuntimeError):
+            raise APIError("ZIP 包无效、损坏或清单不符合规范") from None
+        except OSError:
+            raise APIError("批量暂存服务暂不可用，请稍后重试", 503) from None
+        results.extend(errors)
+        for item in items:
+            try:
+                result = _persist_item(item, identity, uploads, skip_existing=True)
+                if result.get("status") == "skipped":
+                    uploads.resolve_failure()
+                    results.append({"index": item["index"], "title": item["title"], "status": "skipped",
+                                    "toolkitId": result["toolkitId"], "message": "已有同名工具包，已跳过", "error": "已有同名工具包，已跳过"})
+                else:
+                    results.append({"index": item["index"], "title": item["title"], "status": "created",
+                                    "toolkitId": result["id"], "lessonCount": len(item["lessons"])})
+            except (APIError, ValueError) as error:
+                uploads.resolve_failure()
+                message = error.message if isinstance(error, APIError) else str(error)
+                results.append({"index": item["index"], "title": item["title"], "status": "failed",
+                                "message": message, "error": message})
+            except (OSError, SQLAlchemyError):
+                uploads.resolve_failure()
+                results.append({"index": item["index"], "title": item["title"], "status": "failed",
+                                "message": "条目创建失败，请稍后重试文件或数据服务", "error": "条目创建失败，请稍后重试文件或数据服务"})
     results.sort(key=lambda x: x["index"])
-    created = sum(1 for x in results if x["status"] == "created")
-    return jsonify({"total": len(results), "created": created, "failed": len(results) - created, "results": results})
+    return jsonify({"total": len(results), "created": sum(x["status"] == "created" for x in results),
+                    "failed": sum(x["status"] == "failed" for x in results),
+                    "skipped": sum(x["status"] == "skipped" for x in results), "results": results})
 
 
-# ------------------------------------------------------------ 用户内容
-
-@app.post("/api/toolkits/<int:toolkit_id>/favorite")
+@api.post("/api/toolkits/<int:toolkit_id>/favorite")
 @jwt_required()
 def toggle_favorite(toolkit_id):
-    user = current_user()
-    toolkit = db.session.get(Toolkit, toolkit_id)
-    if not toolkit:
-        return jsonify({"message": "工具包不存在"}), 404
-    favorite = Favorite.query.filter_by(user_id=user.id, toolkit_id=toolkit_id).first()
-    if favorite:
-        db.session.delete(favorite)
-        active = False
-    else:
-        db.session.add(Favorite(user_id=user.id, toolkit_id=toolkit_id))
-        active = True
-    db.session.commit()
+    identity = request_identity()
+    with Session(db.engine) as session, session.begin():
+        toolkit = money.lock_toolkit(session, toolkit_id)
+        if not toolkit:
+            raise APIError("工具包不存在", 404)
+        user = money.lock_users(session, [identity.uid])[identity.uid]
+        assert_identity(session, user, identity)
+        if not is_visible(toolkit, user, _purchased(session, user, toolkit_id)):
+            raise APIError("工具包不存在", 404)
+        favorite = session.execute(select(Favorite).where(Favorite.user_id == user.id, Favorite.toolkit_id == toolkit_id)
+                                   .with_for_update()).scalar_one_or_none()
+        if favorite:
+            session.delete(favorite)
+            active = False
+        else:
+            session.add(Favorite(user_id=user.id, toolkit_id=toolkit_id))
+            active = True
     return jsonify({"favorited": active})
 
 
-@app.get("/api/me/favorites")
+@api.get("/api/me/favorites")
 @jwt_required()
 def favorites():
     user = current_user()
-    rows = Favorite.query.filter_by(user_id=user.id).order_by(Favorite.created_at.desc()).all()
-    return jsonify([x.toolkit.serialize(user.id) for x in rows])
+    items = db.session.execute(select(Toolkit).join(Favorite).where(Favorite.user_id == user.id)
+                               .order_by(Favorite.created_at.desc())).scalars().all()
+    bought = set(db.session.execute(select(Purchase.toolkit_id).where(Purchase.user_id == user.id)).scalars())
+    return jsonify(_serialize_list([x for x in items if is_visible(x, user, x.id in bought)], user))
 
 
-@app.get("/api/me/toolkits")
+@api.get("/api/me/toolkits")
 @jwt_required()
 def my_toolkits():
     user = current_user()
-    items = Toolkit.query.filter_by(author_id=user.id).order_by(Toolkit.created_at.desc()).all()
-    return jsonify([x.serialize(user.id) for x in items])
+    return jsonify(_serialize_list(Toolkit.query.filter_by(author_id=user.id).order_by(Toolkit.created_at.desc()).all(), user))
 
 
-@app.post("/api/lessons/<int:lesson_id>/complete")
+@api.post("/api/lessons/<int:lesson_id>/complete")
 @jwt_required()
 def complete_lesson(lesson_id):
-    user = current_user()
-    lesson = db.session.get(Lesson, lesson_id)
-    if not lesson:
-        return jsonify({"message": "步骤不存在"}), 404
-    exists = LessonProgress.query.filter_by(user_id=user.id, lesson_id=lesson_id).first()
-    if not exists:
-        db.session.add(LessonProgress(user_id=user.id, lesson_id=lesson_id))
-        db.session.commit()
+    identity = request_identity()
+    with Session(db.engine) as session, session.begin():
+        toolkit_id = session.execute(select(Lesson.toolkit_id).where(Lesson.id == lesson_id)).scalar_one_or_none()
+        if toolkit_id is None:
+            raise APIError("步骤不存在", 404)
+        toolkit = money.lock_toolkit(session, toolkit_id)
+        user = money.lock_users(session, [identity.uid])[identity.uid]
+        assert_identity(session, user, identity)
+        lesson = session.execute(select(Lesson).where(Lesson.id == lesson_id).with_for_update()
+                                 .execution_options(populate_existing=True)).scalar_one_or_none()
+        if not lesson or not toolkit or lesson.toolkit_id != toolkit_id:
+            raise APIError("步骤不存在", 404)
+        purchase = money.current_purchase(session, user.id, toolkit_id) is not None
+        if not is_visible(toolkit, user, purchase):
+            raise APIError("步骤不存在", 404)
+        if not can_learn(toolkit, user, purchase, lesson):
+            raise APIError("购买后方可完成此步骤", 403)
+        dialect = session.get_bind().dialect.name
+        values = {"user_id": user.id, "lesson_id": lesson_id, "created_at": utcnow()}
+        if dialect == "mysql":
+            from sqlalchemy.dialects.mysql import insert
+            statement = insert(LessonProgress).values(**values)
+            session.execute(statement.on_duplicate_key_update(user_id=statement.inserted.user_id))
+        elif dialect == "sqlite":
+            from sqlalchemy.dialects.sqlite import insert
+            session.execute(insert(LessonProgress).values(**values).on_conflict_do_nothing(index_elements=["user_id", "lesson_id"]))
+        else:
+            raise APIError("数据服务不支持当前数据库", 503)
     return jsonify({"completed": True})
 
 
-@app.get("/api/me/lesson-progress")
+@api.get("/api/me/lesson-progress")
 @jwt_required()
 def lesson_progress():
     user = current_user()
-    toolkit_id = request.args.get("toolkit_id", type=int)
-    query = LessonProgress.query.filter_by(user_id=user.id)
-    if toolkit_id:
-        query = query.join(Lesson, LessonProgress.lesson_id == Lesson.id).filter(Lesson.toolkit_id == toolkit_id)
-    return jsonify([p.lesson_id for p in query.all()])
+    query = select(LessonProgress.lesson_id).where(LessonProgress.user_id == user.id)
+    value = request.args.get("toolkit_id")
+    if value is not None:
+        try:
+            toolkit_id = positive_id(int(value), "工具包ID")
+        except ValueError:
+            raise APIError("工具包ID无效") from None
+        _access_toolkit(db.session, toolkit_id, user)
+        query = query.join(Lesson).where(Lesson.toolkit_id == toolkit_id)
+    return jsonify(list(db.session.execute(query).scalars()))
 
 
-# ------------------------------------------------------------ 交易
-
-COMMISSION_RATE = Decimal("0.20")
-
-
-@app.post("/api/orders")
+@api.post("/api/orders")
 @jwt_required()
 def create_order():
-    user = current_user()
-    data = request.get_json() or {}
-    if not isinstance(data.get("toolkitId"), int):
-        return jsonify({"message": "参数无效"}), 400
-    toolkit = db.session.get(Toolkit, data["toolkitId"])
-    if not toolkit or toolkit.status != "published":
-        return jsonify({"message": "工具包不可购买"}), 404
-    if toolkit.author_id == user.id:
-        return jsonify({"message": "不能购买自己发布的工具包"}), 400
-    if toolkit.price <= 0:
-        return jsonify({"message": "免费工具包无需购买"}), 400
-    if Purchase.query.filter_by(user_id=user.id, toolkit_id=toolkit.id).first():
-        return jsonify({"message": "你已购买此工具包"}), 409
-    existing = Order.query.filter_by(buyer_id=user.id, toolkit_id=toolkit.id, status="pending").first()
-    if existing:
-        return jsonify(existing.serialize())
-    order = Order(
-        order_no=f"ZH{datetime.now():%Y%m%d%H%M%S}{uuid.uuid4().hex[:6].upper()}",
-        buyer_id=user.id, seller_id=toolkit.author_id, toolkit_id=toolkit.id,
-        amount=toolkit.price, commission=(toolkit.price * COMMISSION_RATE).quantize(Decimal("0.01")),
-    )
-    db.session.add(order)
-    db.session.commit()
-    return jsonify(order.serialize()), 201
+    result, status = money.create_order(request_identity(), positive_id(json_object().get("toolkitId"), "工具包ID"))
+    return jsonify(result), status
 
 
-@app.post("/api/orders/<int:order_id>/pay")
+@api.post("/api/orders/<int:order_id>/pay")
 @jwt_required()
 def pay_order(order_id):
-    user_id = int(get_jwt_identity())
-    # 行锁买家与卖家（按 id 排序加锁，避免死锁），杜绝并发余额竞态
-    order = db.session.query(Order).filter_by(id=order_id).with_for_update().first()
-    if not order:
-        return jsonify({"message": "订单不存在"}), 404
-    if order.buyer_id != user_id:
-        return jsonify({"message": "无权支付他人订单"}), 403
-    if order.status != "pending":
-        return jsonify({"message": "订单状态不可支付"}), 400
-    if order.amount <= 0:
-        return jsonify({"message": "订单金额异常"}), 400
-    for uid in sorted({order.buyer_id, order.seller_id}):
-        db.session.query(User).filter_by(id=uid).with_for_update().first()
-    user = db.session.get(User, order.buyer_id)
-    if user.balance < order.amount:
-        return jsonify({"message": "余额不足，请先充值"}), 400
-    seller = db.session.get(User, order.seller_id)
-    user.balance -= order.amount
-    seller.balance += order.commission
-    order.status, order.paid_at = "paid", utcnow()
-    db.session.add(Purchase(user_id=user.id, toolkit_id=order.toolkit_id, order_id=order.id))
-    db.session.add(WalletTransaction(user_id=user.id, type="purchase", amount=-order.amount,
-                                     balance_after=user.balance, note=f"购买《{order.toolkit.title}》", order_id=order.id))
-    db.session.add(WalletTransaction(user_id=seller.id, type="commission", amount=order.commission,
-                                     balance_after=seller.balance, note=f"《{order.toolkit.title}》销售分成", order_id=order.id))
-    db.session.commit()
-    return jsonify({"order": order.serialize(), "user": user.public()})
+    result, status = money.pay_order(request_identity(), order_id)
+    return jsonify(result), status
 
 
-@app.post("/api/orders/<int:order_id>/cancel")
+@api.post("/api/orders/<int:order_id>/cancel")
 @jwt_required()
 def cancel_order(order_id):
-    order = Order.query.filter_by(id=order_id, buyer_id=current_user().id).first()
-    if not order or order.status != "pending":
-        return jsonify({"message": "订单不可取消"}), 400
-    order.status = "cancelled"
-    db.session.commit()
-    return jsonify(order.serialize())
+    return jsonify(money.cancel_order(request_identity(), order_id))
 
 
-@app.get("/api/me/orders")
+@api.get("/api/me/orders")
 @jwt_required()
 def my_orders():
-    rows = Order.query.filter_by(buyer_id=current_user().id).order_by(Order.created_at.desc()).all()
+    rows = Order.query.options(joinedload(Order.toolkit), joinedload(Order.buyer), joinedload(Order.seller)).filter_by(
+        buyer_id=current_user().id).order_by(Order.created_at.desc()).all()
     return jsonify([x.serialize() for x in rows])
 
 
-# ------------------------------------------------------------ 钱包
-
-@app.get("/api/wallet")
+@api.get("/api/wallet")
 @jwt_required()
 def wallet():
     user = current_user()
-    txs = WalletTransaction.query.filter_by(user_id=user.id).order_by(WalletTransaction.created_at.desc()).limit(100).all()
-    income = db.session.query(db.func.sum(WalletTransaction.amount)).filter_by(user_id=user.id, type="commission").scalar() or 0
+    txs = WalletTransaction.query.filter_by(user_id=user.id).order_by(WalletTransaction.created_at.desc(), WalletTransaction.id.desc()).limit(100).all()
+    income = db.session.execute(select(db.func.coalesce(db.func.sum(WalletTransaction.amount), 0)).where(
+                                WalletTransaction.user_id == user.id, WalletTransaction.type == "commission")).scalar_one()
+    # Historical negative seller refund entries reduce income; positive buyer
+    # refunds never count as author income, even when that buyer is a creator.
+    refunds = db.session.execute(select(db.func.coalesce(db.func.sum(WalletTransaction.amount), 0)).join(
+        Order, WalletTransaction.order_id == Order.id).where(WalletTransaction.user_id == user.id,
+        Order.seller_id == user.id, WalletTransaction.type == "refund", WalletTransaction.amount < 0)).scalar_one()
+    demo = current_app.config["WALLET_MODE"] == "simulation"
     return jsonify({"balance": float(user.balance), "frozenBalance": float(user.frozen_balance),
-                    "totalIncome": float(income), "transactions": [x.serialize() for x in txs]})
+                    "totalIncome": float(income), "netIncome": float(income + refunds),
+                    "transactions": [x.serialize() for x in txs], "walletMode": current_app.config["WALLET_MODE"],
+                    "demoEnabled": demo, "canRecharge": demo, "canWithdraw": demo, "canPay": demo})
 
 
-@app.post("/api/wallet/recharge")
+@api.post("/api/wallet/recharge")
 @jwt_required()
 def recharge():
-    user_id = int(get_jwt_identity())
-    db.session.query(User).filter_by(id=user_id).with_for_update().first()
-    user = db.session.get(User, user_id)
-    try:
-        amount = Decimal(str((request.get_json() or {}).get("amount", 0))).quantize(Decimal("0.01"))
-    except Exception:
-        return jsonify({"message": "金额无效"}), 400
-    if amount <= 0 or amount > 50000:
-        return jsonify({"message": "单次充值金额须在 0.01～50000 元"}), 400
-    user.balance += amount
-    db.session.add(WalletTransaction(user_id=user.id, type="recharge", amount=amount,
-                                     balance_after=user.balance, note="钱包充值（模拟支付）"))
-    db.session.commit()
-    return jsonify(user.public())
+    return jsonify(money.wallet_operation(request_identity(), "recharge", json_object().get("amount"), request.headers.get("Idempotency-Key")))
 
 
-@app.post("/api/wallet/withdraw")
+@api.post("/api/wallet/withdraw")
 @jwt_required()
 def withdraw():
-    user_id = int(get_jwt_identity())
-    db.session.query(User).filter_by(id=user_id).with_for_update().first()
-    user = db.session.get(User, user_id)
-    try:
-        amount = Decimal(str((request.get_json() or {}).get("amount", 0))).quantize(Decimal("0.01"))
-    except Exception:
-        return jsonify({"message": "金额无效"}), 400
-    if amount < 10 or amount > user.balance:
-        return jsonify({"message": "提现至少 10 元且不能超过可用余额"}), 400
-    user.balance -= amount
-    db.session.add(WalletTransaction(user_id=user.id, type="withdrawal", amount=-amount,
-                                     balance_after=user.balance, note="余额提现（模拟到账）"))
-    db.session.commit()
-    return jsonify(user.public())
+    return jsonify(money.wallet_operation(request_identity(), "withdraw", json_object().get("amount"), request.headers.get("Idempotency-Key")))
 
 
-# ------------------------------------------------------------ 下载
-
-@app.get("/api/toolkits/<int:toolkit_id>/download")
+@api.get("/api/toolkits/<int:toolkit_id>/download")
 @jwt_required()
 def download(toolkit_id):
-    user = current_user()
-    toolkit = db.session.get(Toolkit, toolkit_id)
-    if not toolkit:
-        return jsonify({"message": "工具包不存在"}), 404
-    unlocked = (toolkit.price == 0 or toolkit.author_id == user.id or user.role == "admin"
-                or Purchase.query.filter_by(user_id=user.id, toolkit_id=toolkit_id).first())
-    if not unlocked:
-        return jsonify({"message": "购买后方可下载"}), 403
-    if not toolkit.resource_path:
-        return jsonify({"message": "作者暂未上传资源"}), 404
-    toolkit.downloads += 1
-    db.session.commit()
-    return send_from_directory(RESOURCE_DIR, toolkit.resource_path,
-                               as_attachment=True, download_name=toolkit.resource_name)
+    identity = request_identity()
+    response = None
+    try:
+        with Session(db.engine) as session, session.begin():
+            toolkit = money.lock_toolkit(session, toolkit_id)
+            if not toolkit:
+                raise APIError("工具包不存在", 404)
+            user = money.lock_users(session, [identity.uid])[identity.uid]
+            assert_identity(session, user, identity)
+            purchased = money.current_purchase(session, user.id, toolkit_id) is not None
+            if not is_visible(toolkit, user, purchased):
+                raise APIError("工具包不存在", 404)
+            if not can_download(toolkit, user, purchased):
+                raise APIError("购买后方可下载", 403)
+            if not toolkit.resource_path or not safe_stored_name(toolkit.resource_path):
+                raise APIError("作者暂未上传资源", 404)
+            asset = session.execute(select(FileAsset).where(FileAsset.stored_name == toolkit.resource_path)).scalar_one_or_none()
+            if asset and (asset.purpose != "resource" or asset.state not in {"active", "legacy", "retained"}):
+                raise APIError("资源不存在", 404)
+            # Preparing/opening the response may raise 404/IO. Increment only
+            # after a response really exists, once under the Toolkit lock.
+            response = send_from_directory(directory("resource"), toolkit.resource_path,
+                                           as_attachment=True, download_name=toolkit.resource_name or "resource")
+            session.execute(update(Toolkit).where(Toolkit.id == toolkit_id).values(downloads=db.func.coalesce(Toolkit.downloads, 0) + 1))
+    except Exception:
+        if response:
+            response.close()
+        raise
+    return response
 
 
-# ------------------------------------------------------------ 管理端
-
-@app.get("/api/admin/stats")
+@api.get("/api/admin/stats")
 @admin_required
 def admin_stats():
-    revenue = db.session.query(db.func.sum(Order.amount)).filter_by(status="paid").scalar() or 0
+    revenue = db.session.execute(select(db.func.coalesce(db.func.sum(Order.amount), 0)).where(Order.status == "paid")).scalar_one()
     return jsonify({"users": User.query.count(), "toolkits": Toolkit.query.count(),
                     "orders": Order.query.filter_by(status="paid").count(), "revenue": float(revenue)})
 
 
-@app.get("/api/admin/toolkits")
+@api.get("/api/admin/toolkits")
 @admin_required
 def admin_toolkits():
-    user = current_user()
-    items = Toolkit.query.order_by(Toolkit.created_at.desc()).all()
-    return jsonify([x.serialize(user.id) for x in items])
+    return jsonify(_serialize_list(Toolkit.query.order_by(Toolkit.created_at.desc()).all(), current_user()))
 
 
-@app.get("/api/admin/orders")
+@api.get("/api/admin/orders")
 @admin_required
 def admin_orders():
-    rows = Order.query.order_by(Order.created_at.desc()).limit(100).all()
+    rows = Order.query.options(joinedload(Order.toolkit), joinedload(Order.buyer), joinedload(Order.seller)).order_by(Order.created_at.desc()).limit(100).all()
     return jsonify([x.serialize() for x in rows])
 
 
-@app.post("/api/admin/toolkits/<int:toolkit_id>/featured")
+@api.post("/api/admin/toolkits/<int:toolkit_id>/featured")
 @admin_required
 def set_featured(toolkit_id):
-    toolkit = db.session.get(Toolkit, toolkit_id)
-    if not toolkit:
-        return jsonify({"message": "工具包不存在"}), 404
-    toolkit.featured = bool((request.get_json() or {}).get("featured"))
-    db.session.commit()
-    return jsonify(toolkit.serialize(current_user().id))
+    featured = json_object().get("featured")
+    if type(featured) is not bool:
+        raise APIError("featured 须为 true/false")
+    identity = request_identity()
+    with Session(db.engine) as session, session.begin():
+        toolkit, _, user = _manage_locked(session, toolkit_id, identity)
+        if user.role != "admin":
+            raise APIError("需要超级管理员权限", 403)
+        toolkit.featured = featured
+        session.flush()
+        result = toolkit.serialize(user.id, user=user)
+    return jsonify(result)
 
 
-@app.post("/api/admin/orders/<int:order_id>/refund")
+@api.post("/api/admin/orders/<int:order_id>/refund")
 @admin_required
 def refund_order(order_id):
-    order = db.session.query(Order).filter_by(id=order_id).with_for_update().first()
-    if not order:
-        return jsonify({"message": "订单不存在"}), 404
-    if order.status != "paid":
-        return jsonify({"message": "仅已支付订单可退款"}), 400
-    for uid in sorted({order.buyer_id, order.seller_id}):
-        db.session.query(User).filter_by(id=uid).with_for_update().first()
-    buyer = db.session.get(User, order.buyer_id)
-    seller = db.session.get(User, order.seller_id)
-    buyer.balance += order.amount
-    seller.balance -= order.commission  # 收回分成，允许为负的中间态由余额保证
-    order.status = "refunded"
-    Purchase.query.filter_by(order_id=order.id).delete()
-    db.session.add(WalletTransaction(user_id=buyer.id, type="refund", amount=order.amount,
-                                     balance_after=buyer.balance, note=f"《{order.toolkit.title}》订单退款", order_id=order.id))
-    db.session.add(WalletTransaction(user_id=seller.id, type="refund", amount=-order.commission,
-                                     balance_after=seller.balance, note=f"《{order.toolkit.title}》分成收回", order_id=order.id))
-    db.session.commit()
-    return jsonify(order.serialize())
-
-
-def prune_revoked_tokens():
-    RevokedToken.query.filter(RevokedToken.expires_at < utcnow()).delete(synchronize_session=False)
-    db.session.commit()
+    # No query, financial mutation or historic data repair in this endpoint.
+    raise APIError("平台不支持退款", 403, "REFUNDS_DISABLED")
 
 
 def seed_data():
-    if User.query.count():
-        return
-    admin = User(username="admin", nickname="知核管理员", password_hash=generate_password_hash(DEMO_PASSWORDS["admin"]),
-                 role="admin", balance=Decimal("1000"), bio="维护知识的秩序")
-    researcher = User(username="researcher", nickname="林博士", password_hash=generate_password_hash(DEMO_PASSWORDS["researcher"]),
-                      role="user", balance=Decimal("288"), bio="单细胞转录组与肿瘤微环境")
-    creator = User(username="creator", nickname="BioLab·周", password_hash=generate_password_hash(DEMO_PASSWORDS["creator"]),
-                   role="user", balance=Decimal("1268.50"), bio="生物信息学工具作者")
-    db.session.add_all([admin, researcher, creator])
-    db.session.flush()
-    samples = [
-        ("单细胞 RNA-seq 标准分析工作流", "从原始矩阵到细胞注释，快速掌握 Seurat 标准分析流程。", "单细胞", "入门", 0, True, "Seurat,RNA-seq,R语言", "https://images.unsplash.com/photo-1576086213369-97a306d36557?auto=format&fit=crop&w=1200&q=85"),
-        ("AlphaFold 3 蛋白结构预测实战", "配置环境、准备输入并解读置信度，完成蛋白复合物结构预测。", "结构生物学", "进阶", 69, True, "AlphaFold,蛋白质,AI", "https://images.unsplash.com/photo-1559757175-0eb30cd8c063?auto=format&fit=crop&w=1200&q=85"),
-        ("CRISPR sgRNA 设计与脱靶评估", "一站式完成靶点选择、引物设计与全基因组脱靶风险评估。", "基因编辑", "进阶", 39, True, "CRISPR,sgRNA,基因编辑", "https://images.unsplash.com/photo-1532187863486-abf9dbad1b69?auto=format&fit=crop&w=1200&q=85"),
-        ("空间转录组数据可视化图谱", "使用 Scanpy 与 Squidpy 构建高质量空间表达和邻域分析图谱。", "空间组学", "专业", 99, False, "空间转录组,Scanpy,Python", "https://images.unsplash.com/photo-1628595351029-c2bf17511435?auto=format&fit=crop&w=1200&q=85"),
-        ("GSEA 富集分析与发表级绘图", "规范完成基因集富集分析，并输出可直接用于论文的图表。", "生信分析", "入门", 0, False, "GSEA,富集分析,绘图", "https://images.unsplash.com/photo-1583912267550-d44c9c800010?auto=format&fit=crop&w=1200&q=85"),
-        ("分子动力学模拟 GROMACS 入门", "蛋白体系构建、能量最小化到轨迹分析的完整实操。", "结构生物学", "专业", 129, False, "GROMACS,分子动力学,蛋白质", "https://images.unsplash.com/photo-1518152006812-edab29b069ac?auto=format&fit=crop&w=1200&q=85"),
-    ]
-    for i, item in enumerate(samples):
-        title, summary, category, level, price, featured, tags, cover = item
-        toolkit = Toolkit(title=title, slug=f"demo-{i+1}", summary=summary,
-                          description=summary + "\n\n本工具包将复杂流程拆解为可复现的操作步骤，包含示例数据、参数说明和常见问题排查，适合希望快速将分析方法应用到真实课题的科研工作者。",
-                          category=category, level=level, price=price, author_id=creator.id, featured=featured,
-                          tags=tags, cover=cover, downloads=1240 - i * 137, rating=Decimal(str(4.9 - i * 0.1)))
-        db.session.add(toolkit)
-        db.session.flush()
-        lesson_titles = ["认识工作流与环境准备", "数据准备与质量控制", "核心分析与参数解读", "结果可视化与导出", "常见问题与进阶实践"]
-        for j, lesson_title in enumerate(lesson_titles):
-            db.session.add(Lesson(
-                toolkit_id=toolkit.id, title=lesson_title,
-                content=f"## {lesson_title}\n\n这是《{title}》的第 {j+1} 个步骤。按照本节说明运行命令并检查输出结果。\n\n### 操作要点\n\n1. 准备示例数据与运行环境\n2. 按推荐参数执行分析\n3. 检查关键质量指标并保存结果\n\n> 提示：实际研究中请根据样本类型调整参数，并保留完整运行日志。",
-                sort_order=j, duration=8 + j * 4, is_preview=j == 0, image=cover))
-    db.session.commit()
+    if current_app.config["APP_ENV"] == "production" or not current_app.config["DEMO_SEED"]:
+        raise RuntimeError("Demo seeding requires explicit DEMO_SEED outside production")
+    with Session(db.engine) as session, session.begin():
+        if session.execute(select(User.id).limit(1)).first():
+            return
+        admin = User(username="admin", nickname="知核管理员", password_hash=generate_password_hash(DEMO_PASSWORDS["admin"]), role="admin", balance=Decimal("1000"))
+        researcher = User(username="researcher", nickname="林博士", password_hash=generate_password_hash(DEMO_PASSWORDS["researcher"]), role="user", balance=Decimal("288"))
+        creator = User(username="creator", nickname="BioLab·周", password_hash=generate_password_hash(DEMO_PASSWORDS["creator"]), role="user", balance=Decimal("1268.50"))
+        session.add_all([admin, researcher, creator])
+        session.flush()
+        samples = [("单细胞 RNA-seq 标准分析工作流", "单细胞", "入门", 0),
+                   ("AlphaFold 3 蛋白结构预测实战", "结构生物学", "进阶", 69),
+                   ("CRISPR sgRNA 设计与脱靶评估", "基因编辑", "进阶", 39),
+                   ("空间转录组数据可视化图谱", "空间组学", "专业", 99),
+                   ("GSEA 富集分析与发表级绘图", "生信分析", "入门", 0),
+                   ("分子动力学模拟 GROMACS 入门", "结构生物学", "专业", 129)]
+        for index, (title, category, level, price) in enumerate(samples):
+            toolkit = Toolkit(title=title, slug=f"demo-{index + 1}", summary=f"{title}：可复现的科研实践步骤。",
+                              description=f"{title}\n\n演示内容，请替换为经过验证的教程。", category=category, level=level,
+                              price=price, author_id=creator.id, featured=index < 3, status="published")
+            session.add(toolkit)
+            session.flush()
+            for j, title in enumerate(["认识工作流与环境准备", "数据准备与质量控制", "核心分析与参数解读", "结果可视化与导出", "常见问题与进阶实践"]):
+                session.add(Lesson(toolkit_id=toolkit.id, title=title, content=f"## {title}\n\n演示步骤，请替换为真实说明。", sort_order=j, duration=10, is_preview=j == 0))
 
 
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-        seed_data()
-        prune_revoked_tokens()
-    if os.getenv("JWT_SECRET_KEY", "") in ("", "dev-only-change-me", "replace-with-a-long-random-secret", "dev-local-secret-please-replace"):
-        app.logger.warning("⚠️ JWT_SECRET_KEY 仍是默认/占位值，正式部署必须替换为随机密钥")
-    app.run(host="0.0.0.0", port=6000, debug=os.getenv("FLASK_DEBUG", "0") == "1")
+    application = create_app()
+    if application.config["APP_ENV"] != "development":
+        raise RuntimeError("The built-in server is development-only; use WSGI in production")
+    application.run(host="127.0.0.1", port=6000, debug=application.config["DEBUG"])
