@@ -76,15 +76,19 @@ describe('mutation/request scope regressions', () => {
     await screen.findByText('Toolkit 1'); expect(screen.getByRole('button', { name: '立即购买' })).toBeDisabled()
     expect(calls.some(x => x.path === '/orders')).toBe(false)
   })
-  it('batch reports created/failed/skipped independently from actual response rows', async () => {
+  it('batch polls the async job and renders per-item results from the report', async () => {
     setToken('A')
-    mockFetch(({ path }) => path === '/batch/prompt' ? json({ text: 'safe prompt' }) : path === '/batch/upload' ? json({ total: 3, created: 1, failed: 1, skipped: 1, results: [{ index: 1, title: 'Created title', status: 'created', toolkitId: 1 }, { index: 2, title: 'Failed title', status: 'failed', error: 'bad input' }, { index: 3, title: 'Skipped title', status: 'skipped' }] }) : undefined)
+    const job = { jobId: 'a'.repeat(32), status: 'done', mode: 'skip', publish: true, total: 3, processed: 3, created: 1, updated: 1, skipped: 1, failed: 1,
+      results: [{ index: 0, title: 'Created title', status: 'created', toolkitId: 1 }, { index: 1, title: 'Updated title', status: 'updated', toolkitId: 2 },
+                { index: 2, title: 'Skipped title', status: 'skipped' }, { index: 3, title: 'Failed title', status: 'failed', error: 'bad input' }] }
+    mockFetch(({ path }) => path === '/batch/prompt' ? json({ text: 'safe prompt' }) : path === '/batch/upload' ? json({ jobId: job.jobId, status: 'queued' }, 202) : path === `/batch/jobs/${job.jobId}` ? json(job) : undefined)
     const result = renderPage(<BatchPublishPage />)
     await screen.findByText('开始批量上传')
     const fileInput = result.container.querySelector('input[type=file]')!
     fireEvent.change(fileInput, { target: { files: [new File(['zip'], 'safe.zip', { type: 'application/zip' })] } })
     fireEvent.click(screen.getByRole('button', { name: '开始批量上传' }))
-    expect(await screen.findByText('共 3 条 · 创建 1 · 失败 1 · 跳过 1')).toBeInTheDocument()
+    expect(await screen.findByText('共 3 条 · 创建 1 · 更新 1 · 跳过 1 · 失败 1')).toBeInTheDocument()
     expect(screen.getByText('Skipped title')).toBeInTheDocument(); expect(screen.getByText('bad input')).toBeInTheDocument()
+    expect(screen.getByText('已更新')).toBeInTheDocument()
   })
 })

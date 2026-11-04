@@ -71,6 +71,8 @@ README_TXT = """知核 · 工具包批量上传标准格式
   tags         选填字符串或≤100项的字符串数组，合并后≤300字
   cover        选填字符串，ZIP 内相对图片路径或 http(s) 图片 URL
   resource     选填字符串，只能是 ZIP 内相对文件路径，禁止 HTTP URL
+  resources    选填数组（≤20项），每项同 resource；与 resource 合并去重，
+               resource 排最前；单个工具包附件总数（含resource）≤20
   lessons      选填数组，默认[]，最多50项；每项必须是对象：
     title        必填字符串，1～160 字
     content      与contentFile必须且只能提供一个，非空Markdown字符串，UTF-8≤1MB

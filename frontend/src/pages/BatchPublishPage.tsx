@@ -6,8 +6,8 @@ import { api, cn, downloadAuthed } from '../lib'
 import { useAuth } from '../AuthContext'
 import { useRequestScope } from '../useRequestScope'
 
-type ItemResult = { index: number; title: string; status: 'created' | 'failed' | 'skipped'; toolkitId?: number; lessonCount?: number; error?: string }
-type Report = { total: number; created: number; failed: number; skipped: number; results: ItemResult[] }
+type ItemResult = { index: number; title: string; status: 'created' | 'updated' | 'failed' | 'skipped'; toolkitId?: number; lessonCount?: number; error?: string }
+type JobReport = { jobId: string; status: 'queued' | 'running' | 'done' | 'failed'; mode: string; publish: boolean; total: number; processed: number; created: number; updated: number; skipped: number; failed: number; error?: string | null; results: ItemResult[]; createdAt?: string }
 
 const STRUCTURE = `zhihe-batch.zip
 ├── toolkits.json      必需 · 工具包清单（UTF-8 JSON 数组）
@@ -22,6 +22,7 @@ const FIELDS = [
   ['category / level', '生信分析·单细胞·空间组学·结构生物学·基因编辑 / 入门·进阶·专业'],
   ['price', '定价 0～9999 元，0 = 免费'],
   ['cover / resource', 'ZIP 内相对路径，或图片 URL；脚本仅作附件下载，不会在平台执行'],
+  ['resources[]', '可选数组，最多 20 个配套附件；与 resource 合并去重'],
   ['lessons[]', 'title + content（或 contentFile，单节 ≤1MB）+ duration + preview 试看'],
 ]
 
@@ -32,9 +33,13 @@ export function BatchPublishPage() {
   const [file, setFile] = useState<File>()
   const [busy, setBusy] = useState(false)
   const [drag, setDrag] = useState(false)
-  const [report, setReport] = useState<Report>()
+  const [report, setReport] = useState<JobReport>()
+  const [mode, setMode] = useState<'skip' | 'update' | 'create'>('skip')
+  const [publish, setPublish] = useState(true)
+  const pollTimer = useRef<number | undefined>(undefined)
   useEffect(() => {
-    setPrompt(''); setFile(undefined); setReport(undefined); setBusy(false); setDrag(false); inFlight.current = false
+    setPrompt(''); setFile(undefined); setReport(undefined); setBusy(false); setDrag(false); setMode('skip'); setPublish(true); inFlight.current = false
+    return () => { if (pollTimer.current) window.clearTimeout(pollTimer.current) }
   }, [scope.key])
   useEffect(() => {
     if (loading || !user || restoreError) return
@@ -55,20 +60,41 @@ export function BatchPublishPage() {
     const request = scope.begin('download')
     try { await downloadAuthed(path, filename, request) } catch (e) { if (request.current()) toast.error((e as Error).message) }
   }
+  const poll = async (jobId: string) => {
+    if (pollTimer.current) window.clearTimeout(pollTimer.current)
+    try {
+      const next = await api<JobReport>(`/batch/jobs/${jobId}`)
+      setReport(next)
+      if (next.status === 'queued' || next.status === 'running') {
+        pollTimer.current = window.setTimeout(() => void poll(jobId), 2000)
+      } else {
+        inFlight.current = false; setBusy(false)
+        if (next.status === 'failed') toast.error(next.error || '批量任务失败')
+        else {
+          const createdCount = next.created + next.updated
+          createdCount ? toast.success(`处理完成：新建 ${next.created} · 更新 ${next.updated} · 跳过 ${next.skipped} · 失败 ${next.failed}`) : toast.warning('没有成功条目，请查看下方原因')
+        }
+      }
+    } catch (e) {
+      inFlight.current = false; setBusy(false)
+      if (pollTimer.current) pollTimer.current = window.setTimeout(() => void poll(jobId), 5000)
+      toast.error((e as Error).message || '进度读取失败，将自动重试')
+    }
+  }
   const upload = async () => {
     if (inFlight.current) return
     if (!file) return toast.error('请先选择要上传的 ZIP 文件')
     inFlight.current = true; setBusy(true); setReport(undefined); const request = scope.begin('upload')
     try {
-      const body = new FormData(); body.append('package', file)
-      const result = await api<Report>('/batch/upload', { method: 'POST', body, signal: request.signal })
-      if (!request.current()) return
-      setReport(result)
-      result.created ? toast.success(`成功创建 ${result.created} 个工具包`) : toast.warning('没有新建工具包，请查看下方原因')
-    } catch (e) { if (request.current()) toast.error((e as Error).message) }
-    finally { if (request.current()) { inFlight.current = false; setBusy(false) } }
+      const body = new FormData(); body.append('package', file); body.append('mode', mode); body.append('publish', publish ? '1' : '0')
+      const result = await api<{ jobId: string }>('/batch/upload', { method: 'POST', body, signal: request.signal })
+      if (!request.current()) { inFlight.current = false; setBusy(false); return }
+      setReport({ jobId: result.jobId, status: 'queued', mode, publish, total: 0, processed: 0, created: 0, updated: 0, skipped: 0, failed: 0, results: [] })
+      toast.success('已开始后台处理，可离开页面稍后回来查看')
+      void poll(result.jobId)
+    } catch (e) { if (request.current()) { inFlight.current = false; setBusy(false); toast.error((e as Error).message) } }
   }
-  const statusStyle = { created: ['bg-emerald-100 text-emerald-700', CheckCircle2, '已创建'], skipped: ['bg-amber-100 text-amber-700', Layers, '已跳过'], failed: ['bg-red-100 text-red-600', XCircle, '失败'] } as const
+  const statusStyle = { created: ['bg-emerald-100 text-emerald-700', CheckCircle2, '已创建'], updated: ['bg-sky-100 text-sky-700', ArrowRight, '已更新'], skipped: ['bg-amber-100 text-amber-700', Layers, '已跳过'], failed: ['bg-red-100 text-red-600', XCircle, '失败'] } as const
 
   return <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6 lg:py-12">
     <Link to="/me/toolkits" className="inline-flex items-center gap-2 text-sm text-slate-500"><ArrowLeft size={16} />返回我的工具包</Link>
@@ -112,31 +138,52 @@ export function BatchPublishPage() {
     </section>
 
     <section className="panel mt-6 p-6 sm:p-8">
-      <StepHead n={3} title="上传标准 ZIP" desc="上传后逐条创建工具包，并给出具体的成功 / 失败报告" />
+      <StepHead n={3} title="上传标准 ZIP" desc="上传后由后台逐条处理，实时显示每一条的进度与结果" />
+      <div className="mt-6 grid gap-3 sm:grid-cols-2">
+        <div className="rounded-2xl border bg-slate-50/60 p-4">
+          <label className="text-xs font-bold text-slate-500">同名工具包处理方式</label>
+          <div className="mt-2 flex gap-2">
+            {([['skip', '跳过（只建新）'], ['update', '覆盖更新'], ['create', '允许重名新建']] as const).map(([value, label]) =>
+              <button key={value} type="button" disabled={busy} onClick={() => setMode(value)} className={cn('rounded-xl border px-3 py-1.5 text-xs font-bold transition', mode === value ? 'border-pine bg-ink text-white' : 'text-slate-500 hover:bg-white')}>{label}</button>)}
+          </div>
+        </div>
+        <div className="rounded-2xl border bg-slate-50/60 p-4">
+          <label className="text-xs font-bold text-slate-500">创建后的状态</label>
+          <div className="mt-2 flex gap-2">
+            {([[true, '直接上架'], [false, '存为草稿']] as const).map(([value, label]) =>
+              <button key={String(value)} type="button" disabled={busy} onClick={() => setPublish(value)} className={cn('rounded-xl border px-3 py-1.5 text-xs font-bold transition', publish === value ? 'border-pine bg-ink text-white' : 'text-slate-500 hover:bg-white')}>{label}</button>)}
+          </div>
+          <p className="mt-2 text-[11px] leading-4 text-slate-400">草稿仅自己可见，可在「我的工具包」一键发布</p>
+        </div>
+      </div>
       <label onDragOver={e => { e.preventDefault(); setDrag(true) }} onDragLeave={() => setDrag(false)} onDrop={e => { e.preventDefault(); if (busy) return; setDrag(false); const f = e.dataTransfer.files?.[0]; if (f?.name.toLowerCase().endsWith('.zip')) setFile(f); else if (f) toast.error('仅支持 .zip 文件') }}
-        className={cn('mt-6 flex cursor-pointer flex-col items-center rounded-2xl border-2 border-dashed p-8 text-center transition', drag ? 'border-pine bg-emerald-50/60' : 'hover:border-pine hover:bg-emerald-50/30')}>
+        className={cn('mt-4 flex cursor-pointer flex-col items-center rounded-2xl border-2 border-dashed p-8 text-center transition', drag ? 'border-pine bg-emerald-50/60' : 'hover:border-pine hover:bg-emerald-50/30')}>
         <UploadCloud className="text-emerald-700" />
         <b className="mt-3 text-sm text-ink">{file ? file.name : '点击选择或拖拽 ZIP 文件到此处'}</b>
         <span className="mt-1 text-xs text-slate-400">{file ? `${(file.size / 1024 / 1024).toFixed(2)} MB` : '须包含 toolkits.json，最大 100MB'}</span>
         <input disabled={busy} type="file" accept=".zip,application/zip" className="hidden" onChange={e => { setFile(e.target.files?.[0]); setReport(undefined) }} />
       </label>
       <div className="mt-5 flex justify-end">
-        <button disabled={busy || !file} onClick={upload} className="btn-mint px-7">{busy ? <><Loader2 size={16} className="animate-spin" />正在解析上传…</> : <>开始批量上传<ArrowRight size={16} /></>}</button>
+        <button disabled={busy || !file} onClick={upload} className="btn-mint px-7">{busy ? <><Loader2 size={16} className="animate-spin" />正在处理…</> : <>开始批量上传<ArrowRight size={16} /></>}</button>
       </div>
       {report && <div className="mt-6">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3">
-          <p className="text-sm font-bold text-ink">共 {report.total} 条 · 创建 {report.created} · 失败 {report.failed} · 跳过 {report.skipped ?? report.results.filter(x => x.status === 'skipped').length}</p>
-          <div className="flex gap-2">
-            <button className="btn-ghost" onClick={() => { setReport(undefined); setFile(undefined) }}>重新上传</button>
-            {report.created > 0 && <button className="btn-primary" onClick={() => navigate('/me/toolkits')}>查看我的工具包</button>}
-          </div>
-        </div>
+        {(report.status === 'queued' || report.status === 'running') &&
+          <p role="status" className="flex items-center gap-2 rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-800"><Loader2 size={15} className="animate-spin" />后台处理中 {report.processed}/{report.total || '…'}，可离开此页面，稍后回来查看</p>}
+        {report.status === 'failed' && <p role="alert" className="rounded-2xl bg-red-50 px-4 py-3 text-sm font-bold text-red-600">{report.error || '批量任务失败，请重新上传'}</p>}
+        {report.status === 'done' &&
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-slate-50 px-4 py-3">
+            <p className="text-sm font-bold text-ink">共 {report.total} 条 · 创建 {report.created} · 更新 {report.updated} · 跳过 {report.skipped} · 失败 {report.failed}</p>
+            <div className="flex gap-2">
+              <button className="btn-ghost" onClick={() => { setReport(undefined); setFile(undefined) }}>重新上传</button>
+              {(report.created + report.updated) > 0 && <button className="btn-primary" onClick={() => navigate('/me/toolkits')}>查看我的工具包</button>}
+            </div>
+          </div>}
         <div className="mt-3 space-y-2">{report.results.map(x => {
           const [chip, Icon, label] = statusStyle[x.status]
           return <div key={x.index} className="flex items-center gap-3 rounded-2xl border bg-white p-3.5">
             <span className={cn('chip shrink-0', chip)}><Icon size={13} />{label}</span>
             <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-ink">{x.title}</p>{x.error && <p className="mt-0.5 text-xs text-red-500">{x.error}</p>}</div>
-            {x.toolkitId && <Link to={`/toolkits/${x.toolkitId}`} className="shrink-0 text-xs font-bold text-emerald-700">{x.status === 'created' ? `${x.lessonCount ?? 0} 个步骤 · 查看` : '查看'}</Link>}
+            {x.toolkitId && <Link to={`/toolkits/${x.toolkitId}`} className="shrink-0 text-xs font-bold text-emerald-700">{x.status === 'created' || x.status === 'updated' ? `${x.lessonCount ?? 0} 个步骤 · 查看` : '查看'}</Link>}
           </div>
         })}</div>
       </div>}

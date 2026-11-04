@@ -15,6 +15,7 @@ MAX_ZIP_COMPRESSED = 100 * 1024 * 1024
 MAX_ZIP_UNCOMPRESSED = 300 * 1024 * 1024
 MAX_ZIP_MEMBERS = 2000
 MAX_DESCRIPTION_CHARS = 20000
+MAX_BATCH_RESOURCES = 20
 MAX_PATH_CHARS = 500
 MAX_FILENAME_CHARS = 200
 MANIFEST_NAME = "toolkits.json"
@@ -108,6 +109,24 @@ def resource_source(value, field="resource"):
     return rel
 
 
+def resource_sources(raw):
+    """Ordered resource paths from legacy `resource` plus list `resources` (≤20 total)."""
+    paths = []
+    legacy = resource_source(raw.get("resource", ""))
+    if legacy:
+        paths.append(legacy)
+    extra = raw.get("resources", [])
+    if not isinstance(extra, list) or len(extra) > MAX_BATCH_RESOURCES:
+        raise ValueError(f"resources 必须是不超过 {MAX_BATCH_RESOURCES} 项的数组")
+    for entry in extra:
+        rel = resource_source(entry, "resources")
+        if rel and rel not in paths:
+            paths.append(rel)
+    if len(paths) > MAX_BATCH_RESOURCES:
+        raise ValueError(f"附件总数不能超过 {MAX_BATCH_RESOURCES} 个")
+    return paths
+
+
 def manifest_items(data):
     """Accept an array or the legacy {toolkits: [...]} wrapper, never scalar JSON."""
     if isinstance(data, dict):
@@ -199,7 +218,7 @@ def normalize_batch_item(raw, index, resolver, text_budget):
         text_budget.charge(len(ltitle.encode("utf-8")))
         lesson_specs.append((ltitle, body, content_file, duration, preview, image_url, image_rel))
     cover_url, cover_rel = image_source(raw.get("cover", ""), "cover")
-    resource_rel = resource_source(raw.get("resource", ""))
+    resource_rels = resource_sources(raw)
     lessons = []
     for ltitle, body, content_file, duration, preview, image_url, image_rel in lesson_specs:
         if content_file is not None:
@@ -208,15 +227,16 @@ def normalize_batch_item(raw, index, resolver, text_budget):
                         "preview": preview, "image_url": image_url,
                         "image_file": resolver.asset(image_rel, "image") if image_rel else None})
     cover_file = resolver.asset(cover_rel, "cover") if cover_rel else None
-    resource_file = resolver.asset(resource_rel, "resource") if resource_rel else None
+    resource_files = [resolver.asset(rel, "resource") for rel in resource_rels]
     for lesson in lessons:
         lesson["image_name"] = lesson["image_file"]["name"] if lesson["image_file"] else None
     return {"index": index, "title": title, "summary": summary, "description": description,
             "category": category, "level": level, "price": price, "tags": tags,
             "cover_url": cover_url, "cover_file": cover_file,
             "cover_name": cover_file["name"] if cover_file else None,
-            "resource_file": resource_file,
-            "resource_name": resource_file["name"] if resource_file else None,
+            "resource_files": resource_files,
+            "resource_file": resource_files[0] if resource_files else None,
+            "resource_name": resource_files[0]["name"] if resource_files else None,
             "lessons": lessons}
 
 

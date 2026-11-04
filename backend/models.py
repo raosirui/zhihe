@@ -1,7 +1,7 @@
 """Persistent domain models; schema creation is an explicit operator action."""
 from datetime import datetime, timezone
 from sqlalchemy.dialects.mysql import LONGTEXT
-from sqlalchemy.orm import column_property, deferred, object_session
+from sqlalchemy.orm import column_property, deferred, object_session, relationship, backref
 from extensions import db
 
 ASSET_PATH = "/api/uploads/"
@@ -51,6 +51,7 @@ class Toolkit(db.Model):
     status = db.Column(db.Enum("draft", "published", "offline"), default="published")
     downloads = db.Column(db.Integer, default=0)
     rating = db.Column(db.Numeric(3, 1), default=5.0)
+    rating_count = db.Column(db.Integer, default=0, nullable=False, server_default="0")
     featured = db.Column(db.Boolean, default=False)
     tags = db.Column(db.String(300), default="")
     resource_name = db.Column(db.String(255))
@@ -70,7 +71,8 @@ class Toolkit(db.Model):
         data = {"id": self.id, "title": self.title, "slug": self.slug, "summary": self.summary,
                 "category": self.category, "level": self.level, "cover": self.cover, "price": float(self.price),
                 "author": {"id": self.author.id, "nickname": self.author.nickname, "avatar": self.author.avatar},
-                "downloads": self.downloads, "rating": float(self.rating), "featured": self.featured,
+                "downloads": self.downloads, "rating": float(self.rating), "ratingCount": int(self.rating_count or 0),
+                "featured": self.featured,
                 "tags": [x for x in (self.tags or "").split(",") if x], "status": self.status,
                 "purchased": purchased, "favorited": favorited, "lessonCount": self.lesson_count,
                 "canLearn": unlocked, "canPreview": self.status == "published" and self.preview_count > 0,
@@ -78,9 +80,29 @@ class Toolkit(db.Model):
                 "canManage": is_manager(self, user), "createdAt": self.created_at.isoformat()}
         if detail:
             data.update({"description": self.description, "resourceName": self.resource_name,
+                         "resources": self.serialize_resources(user, purchased),
                          "lessons": [x.serialize(can_learn(self, user, purchased, x))
                                      for x in sorted(self.lessons, key=lambda x: (x.sort_order, x.id))]})
         return data
+
+    def serialize_resources(self, user, purchased):
+        """Buyer-visible attachment list. URLs are exposed only when the caller
+        can download; everyone eligible sees names with a locked flag."""
+        from access import can_download
+        refs = sorted((ref for ref in self.file_references if ref.usage == "resource"),
+                      key=lambda ref: (ref.sort_order, ref.id))
+        allow = can_download(self, user, purchased)
+        items = []
+        for ref in refs:
+            asset = ref.asset
+            if not asset or asset.state not in {"active", "legacy", "retained"}:
+                continue
+            item = {"refId": ref.id, "name": ref.name or asset.stored_name.split("_", 1)[-1],
+                    "size": int(asset.size or 0), "locked": not allow}
+            if allow:
+                item["downloadUrl"] = f"/api/toolkits/{self.id}/resources/{ref.id}/download"
+            items.append(item)
+        return items
 
 
 class Lesson(db.Model):
@@ -221,10 +243,14 @@ class FileAsset(db.Model):
 class FileReference(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     asset_id = db.Column(db.Integer, db.ForeignKey("file_asset.id"), nullable=False, index=True)
+    asset = relationship("FileAsset", lazy="selectin", backref=backref("references", lazy="select"))
     toolkit_id = db.Column(db.Integer, db.ForeignKey("toolkit.id"), nullable=False, index=True)
+    toolkit = relationship("Toolkit", backref=backref("file_references", lazy="select"))
     lesson_id = db.Column(db.Integer, db.ForeignKey("lesson.id"), nullable=True)
     usage = db.Column(db.String(24), nullable=False)
     binding_key = db.Column(db.String(160), unique=True, nullable=False)
+    name = db.Column(db.String(255))
+    sort_order = db.Column(db.Integer, nullable=False, default=0, server_default="0")
     created_at = db.Column(db.DateTime, default=utcnow)
 
 
@@ -235,3 +261,48 @@ class FileOperation(db.Model):
     status = db.Column(db.String(24), nullable=False)
     created_at = db.Column(db.DateTime, default=utcnow)
     updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ToolkitRating(db.Model):
+    """One score per (user, toolkit); only buyers may rate. Aggregate is written
+    back onto Toolkit.rating/rating_count under the Toolkit lock."""
+    __tablename__ = "toolkit_rating"
+    __table_args__ = (db.UniqueConstraint("user_id", "toolkit_id", name="uq_rating_user_toolkit"),)
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    toolkit_id = db.Column(db.Integer, db.ForeignKey("toolkit.id", ondelete="CASCADE"), nullable=False, index=True)
+    score = db.Column(db.Integer, nullable=False)
+    created_at = db.Column(db.DateTime, default=utcnow)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
+
+
+class BatchJob(db.Model):
+    """Durable record for an asynchronous batch import. The uploaded package is
+    staged to disk by the request, then a worker drains items independently and
+    writes per-item progress here so the client can poll instead of holding an
+    HTTP connection open through a long synchronous import."""
+    id = db.Column(db.String(32), primary_key=True)
+    owner_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    status = db.Column(db.String(16), nullable=False, default="queued")  # queued/running/done/failed
+    mode = db.Column(db.String(16), nullable=False, default="skip")      # skip/update/new-only
+    publish = db.Column(db.Boolean, nullable=False, default=True)        # otherwise import as drafts
+    total = db.Column(db.Integer, nullable=False, default=0)
+    processed = db.Column(db.Integer, nullable=False, default=0)
+    created = db.Column(db.Integer, nullable=False, default=0)
+    updated = db.Column(db.Integer, nullable=False, default=0)
+    skipped = db.Column(db.Integer, nullable=False, default=0)
+    failed = db.Column(db.Integer, nullable=False, default=0)
+    results_json = db.Column(db.Text, nullable=False, default="[]")
+    package_path = db.Column(db.String(500))    # staged ZIP kept until the worker consumes it
+    package_size = db.Column(db.BigInteger, nullable=False, default=0)
+    error = db.Column(db.String(300))
+    created_at = db.Column(db.DateTime, default=utcnow)
+    updated_at = db.Column(db.DateTime, default=utcnow, onupdate=utcnow)
+    claimed_by = db.Column(db.String(64))        # worker lease token
+    claimed_at = db.Column(db.DateTime)
+
+    def progress(self):
+        return {"jobId": self.id, "status": self.status, "mode": self.mode, "publish": self.publish,
+                "total": self.total, "processed": self.processed, "created": self.created,
+                "updated": self.updated, "skipped": self.skipped, "failed": self.failed,
+                "error": self.error, "createdAt": self.created_at.isoformat() if self.created_at else None}

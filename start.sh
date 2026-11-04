@@ -28,8 +28,11 @@ if [[ "$1" == prod ]]; then
     exit 1
   fi
   # A reverse proxy/TLS terminator may expose this loopback service. No Vite preview.
+  # --timeout 120 is defense-in-depth for large single uploads; batch imports run
+  # in the background worker and return 202 immediately, so they never hit it.
   exec "$PYTHON" -m gunicorn --chdir "$ROOT/backend" \
     --bind "${GUNICORN_BIND:-127.0.0.1:6000}" --workers "${GUNICORN_WORKERS:-2}" \
+    --timeout "${GUNICORN_TIMEOUT:-120}" --graceful-timeout 30 \
     --access-logfile - --error-logfile - 'wsgi:create_app()'
 fi
 export APP_ENV="${APP_ENV:-development}"

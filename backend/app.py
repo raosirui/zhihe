@@ -26,17 +26,19 @@ from extensions import db, jwt
 from config import build_config
 from models import (User, Toolkit, Lesson, Favorite, Order, Purchase, WalletTransaction,
                     WalletReceipt, LessonProgress, RevokedToken, RateLimitGuard, RateLimitBucket,
-                    FileAsset, FileReference, FileOperation, utcnow, ASSET_PATH, LESSON_ASSET_PATH)
+                    FileAsset, FileReference, FileOperation, ToolkitRating, BatchJob,
+                    utcnow, ASSET_PATH, LESSON_ASSET_PATH)
 from security import (APIError, current_user, optional_user, optional_user_id, admin_required,
                       request_identity, assert_identity, configure_jwt, json_object, text,
-                      positive_id, rate_hits, rate_hit, client_ip, account_rate_key)
+                      positive_id, rate_hits, rate_hit, client_ip, account_rate_key, lock_existing_child)
 from access import is_manager, is_visible, can_learn, can_download
 import money_service as money
 from file_service import (UploadContext, directory, init_storage, safe_stored_name, source_asset,
                           lock_assets, bind_reference, unbind_toolkit, referenced_asset_ids,
                           reclaim_asset, recover_file_operations)
 from batch_kit import PROMPT_TEXT, build_skill_zip, build_template_zip, load_batch_package, ManifestError
-from validation import parse_money, CATEGORIES, LEVELS, IMAGE_EXTENSIONS, string_field, image_source
+import batch_worker
+from validation import parse_money, CATEGORIES, LEVELS, IMAGE_EXTENSIONS, string_field, image_source, MAX_BATCH_RESOURCES
 
 api = Blueprint("api", __name__)
 DEMO_PASSWORDS = {"admin": "Admin@123", "researcher": "User@123", "creator": "Creator@123"}
@@ -218,21 +220,20 @@ def _canonical_lesson_image(value):
 
 def _prepare_item_assets(item, uploads):
     cover = uploads.descriptor("image", item.get("cover_file"))
-    resource = uploads.descriptor("resource", item.get("resource_file"))
-    if item.get("resource_stream"):
-        stream, name = item["resource_stream"]
+    resources = [uploads.descriptor("resource", descriptor) for descriptor in (item.get("resource_files") or [])]
+    for stream, name in (item.get("resource_streams") or []):
         # Multipart is already streamed into Werkzeug's private spool; don't
         # materialize it as bytes just to determine its length.
         position = stream.tell()
         stream.seek(0, os.SEEK_END)
         size = stream.tell() - position
         stream.seek(position)
-        resource = uploads.prepare("resource", name, stream, size)
+        resources.append(uploads.prepare("resource", name, stream, size))
     images = [uploads.descriptor("asset", lesson.get("image_file")) for lesson in (item["lessons"] or [])]
-    return cover, resource, images
+    return cover, [x for x in resources if x], images
 
 
-def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False):
+def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False, publish=True):
     """Single/batch shared import with a fresh transaction per item."""
     if skip_existing:
         # Detect existing titles before any filesystem work/quota reservation.
@@ -244,18 +245,24 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False)
                        Toolkit.title == item["title"]).order_by(Toolkit.id).limit(1)).scalar_one_or_none()
             if existing:
                 return {"toolkitId": existing, "status": "skipped"}
-    cover, resource, images = _prepare_item_assets(item, uploads)
-    allocated = {x["id"] for x in [cover, resource, *images] if x}
+    cover, resources, images = _prepare_item_assets(item, uploads)
+    allocated = {x["id"] for x in [cover, *resources, *images] if x}
     created_id = None
     stale_ids = []
     try:
         with Session(db.engine, expire_on_commit=False) as session, session.begin():
+            retained_resources = []
             if toolkit_id:
                 toolkit = money.lock_toolkit(session, toolkit_id)
                 if not toolkit:
                     raise APIError("工具包不存在", 404)
                 money.lock_orders(session, toolkit_id)
                 stale_ids = referenced_asset_ids(session, toolkit_id)
+                # Old attachment names survive a replacement-free edit.
+                retained_resources = [(row.asset_id, row.name, row.sort_order) for row in
+                                      session.execute(select(FileReference).where(
+                                          FileReference.toolkit_id == toolkit_id,
+                                          FileReference.usage == "resource")).scalars()]
             else:
                 toolkit = None
             old_cover = toolkit.cover if toolkit else None
@@ -291,8 +298,9 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False)
                 if existing:
                     return {"toolkitId": existing, "status": "skipped"}
             if not toolkit:
+                new_status = item.get("status") or ("published" if publish else "draft")
                 toolkit = Toolkit(slug=f"{uuid.uuid4().hex[:12]}-{secure_filename(item['title'])[:50] or 'toolkit'}",
-                                  author_id=owner.id, status="published", featured=False)
+                                  author_id=owner.id, status=new_status, featured=False)
                 session.add(toolkit)
             for field in ["title", "summary", "description", "category", "level", "price", "tags"]:
                 setattr(toolkit, field, item[field])
@@ -318,7 +326,9 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False)
                 preserved = bool(previous and not prepared and url == _canonical_lesson_image(previous.image))
                 asset_id = prepared["id"] if prepared else source_asset(session, url, identity, "lesson", preserve_unknown=preserved)
                 lesson_ids.append((url, asset_id, previous, preserved))
-            asset_ids = [x for x in [cover_id, resource["id"] if resource else None, *[x[1] for x in lesson_ids], *stale_ids] if x]
+            asset_ids = [x for x in [cover_id, *[r["id"] for r in resources],
+                                     *[x[1] for x in lesson_ids], *stale_ids,
+                                     *[row[0] for row in retained_resources]] if x]
             assets = lock_assets(session, asset_ids)
             if toolkit_id:
                 unbind_toolkit(session, toolkit.id, {asset_id: assets[asset_id] for asset_id in set(stale_ids)})
@@ -329,16 +339,21 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False)
             toolkit.cover = cover_url
             if cover_id:
                 bind_reference(session, assets[cover_id], identity, toolkit.id, "cover", preserve=preserve_cover)
-            if resource:
-                toolkit.resource_name, toolkit.resource_path = resource["name"], resource["stored_name"]
-                bind_reference(session, assets[resource["id"]], identity, toolkit.id, "resource")
+            if resources:
+                for position, resource in enumerate(resources):
+                    bind_reference(session, assets[resource["id"]], identity, toolkit.id, "resource",
+                                   name=resource["name"], sort_order=position,
+                                   binding_key=f"toolkit:{toolkit.id}:resource:{position}:{resource['id']}")
+                toolkit.resource_name, toolkit.resource_path = resources[0]["name"], resources[0]["stored_name"]
             elif toolkit_id:
-                # Existing resource is unchanged when edit has no replacement.
-                # Restore its registry binding rather than lose ownership.
-                if toolkit.resource_path:
-                    retained = next((x for x in assets.values() if x.stored_name == toolkit.resource_path), None)
+                # Attachments are unchanged when the edit carries no replacement.
+                # Restore their registry bindings rather than lose ownership.
+                for asset_id, ref_name, ref_sort in retained_resources:
+                    retained = assets.get(asset_id)
                     if retained:
-                        bind_reference(session, retained, identity, toolkit.id, "resource", preserve=True)
+                        bind_reference(session, retained, identity, toolkit.id, "resource",
+                                       name=ref_name, sort_order=ref_sort, preserve=True,
+                                       binding_key=f"toolkit:{toolkit.id}:resource:{ref_sort}:{asset_id}")
             for index, (data, (url, asset_id, previous, preserved_image)) in enumerate(zip(item["lessons"], lesson_ids)):
                 # Platform images always use the protected policy route. Public
                 # shared images keep their underlying image-directory purpose.
@@ -529,10 +544,15 @@ def _single_item(partial=False):
         raise APIError(error)
     if partial and "lessons" not in data:
         lessons = None
-    resource = request.files.get("resource")
-    return {**fields, "cover_file": None, "resource_file": None,
-            "resource_stream": (resource.stream, resource.filename) if resource and resource.filename else None,
-            "lessons": lessons}
+    files = [f for f in request.files.getlist("resource") if f and f.filename]
+    if len(files) > MAX_BATCH_RESOURCES:
+        raise APIError(f"附件不能超过 {MAX_BATCH_RESOURCES} 个")
+    streams = [(f.stream, f.filename) for f in files]
+    status = data.get("status") if not partial else None
+    if status is not None and status not in {"draft", "published"}:
+        raise APIError("状态无效")
+    return {**fields, "cover_file": None, "resource_files": [], "resource_streams": streams,
+            "status": status, "lessons": lessons}
 
 
 @api.post("/api/toolkits")
@@ -577,13 +597,18 @@ def _manage_locked(session, toolkit_id, identity):
 @jwt_required()
 def update_status(toolkit_id):
     status = json_object().get("status")
-    if not isinstance(status, str) or status not in {"published", "offline"}:
+    if not isinstance(status, str) or status not in {"published", "offline", "draft"}:
         raise APIError("状态无效")
     identity = request_identity()
     with Session(db.engine, expire_on_commit=False) as session, session.begin():
         toolkit, _, user = _manage_locked(session, toolkit_id, identity)
-        if user.role != "admin" and status != "offline":
-            raise APIError("作者只能下架自己的工具包", 403)
+        if user.role != "admin":
+            # Authors publish their own drafts and always take live toolkits
+            # offline; re-listing an offline toolkit stays an admin action.
+            allowed = ((toolkit.status == "draft" and status in {"published", "draft"})
+                       or (toolkit.status in {"published", "draft"} and status == "offline"))
+            if not allowed:
+                raise APIError("作者只能发布草稿或下架自己的工具包", 403)
         toolkit.status = status
         session.flush()
         result = toolkit.serialize(user.id, user=user)
@@ -622,12 +647,17 @@ def delete_toolkit(toolkit_id):
 
 @api.get("/api/uploads/<stored>")
 def uploaded_cover(stored):
-    optional_user()  # Invalid optional credentials still fail, even on public URLs.
+    user = optional_user()  # Invalid optional credentials still fail, even on public URLs.
     if not safe_stored_name(stored) or os.path.splitext(stored)[1].lower() not in IMAGE_EXTENSIONS:
         raise APIError("资源不存在", 404)
     asset = db.session.execute(select(FileAsset).where(FileAsset.stored_name == stored)).scalar_one_or_none()
     if asset:
-        if asset.purpose != "image" or not asset.is_public or asset.state not in {"active", "legacy", "retained"}:
+        if asset.purpose != "image" or asset.state not in {"active", "legacy", "retained"}:
+            raise APIError("资源不存在", 404)
+        # Owners always see their own uploads (draft covers are not public refs).
+        if user and asset.owner_id == user.id:
+            return send_from_directory(directory("image"), stored)
+        if not asset.is_public:
             raise APIError("资源不存在", 404)
         public_ref = db.session.execute(select(FileReference.id).join(Toolkit, FileReference.toolkit_id == Toolkit.id)
                      .where(FileReference.asset_id == asset.id, FileReference.usage == "cover", Toolkit.status == "published")).first()
@@ -685,47 +715,57 @@ def batch_prompt():
 @api.post("/api/batch/upload")
 @jwt_required()
 def batch_upload():
+    """Accept a package, stream it to durable staging, and enqueue an async job.
+    Returns immediately so Gunicorn's request timeout never kills a long import;
+    clients poll /api/batch/jobs/<id> for per-item progress."""
     identity = request_identity()
     rate_hits([(f"batch:user:{identity.uid}", 10, 600), (f"batch:ip:{client_ip()}", 20, 600)])
     file = request.files.get("package")
     if not file:
         raise APIError("请选择要上传的 ZIP 文件")
-    results = []
-    uploads = UploadContext(identity)
-    # Do not file.read()/BytesIO the ZIP. Its private upload stream and all
-    # extracted descriptors stay alive throughout every independent import.
-    with TemporaryDirectory(prefix="zhihe-batch-") as staging:
-        try:
-            with zipfile.ZipFile(file.stream) as zf:
-                items, errors = load_batch_package(zf, staging)
-        except (zipfile.BadZipFile, ValueError, RuntimeError):
-            raise APIError("ZIP 包无效、损坏或清单不符合规范") from None
-        except OSError:
-            raise APIError("批量暂存服务暂不可用，请稍后重试", 503) from None
-        results.extend(errors)
-        for item in items:
-            try:
-                result = _persist_item(item, identity, uploads, skip_existing=True)
-                if result.get("status") == "skipped":
-                    uploads.resolve_failure()
-                    results.append({"index": item["index"], "title": item["title"], "status": "skipped",
-                                    "toolkitId": result["toolkitId"], "message": "已有同名工具包，已跳过", "error": "已有同名工具包，已跳过"})
-                else:
-                    results.append({"index": item["index"], "title": item["title"], "status": "created",
-                                    "toolkitId": result["id"], "lessonCount": len(item["lessons"])})
-            except (APIError, ValueError) as error:
-                uploads.resolve_failure()
-                message = error.message if isinstance(error, APIError) else str(error)
-                results.append({"index": item["index"], "title": item["title"], "status": "failed",
-                                "message": message, "error": message})
-            except (OSError, SQLAlchemyError):
-                uploads.resolve_failure()
-                results.append({"index": item["index"], "title": item["title"], "status": "failed",
-                                "message": "条目创建失败，请稍后重试文件或数据服务", "error": "条目创建失败，请稍后重试文件或数据服务"})
-    results.sort(key=lambda x: x["index"])
-    return jsonify({"total": len(results), "created": sum(x["status"] == "created" for x in results),
-                    "failed": sum(x["status"] == "failed" for x in results),
-                    "skipped": sum(x["status"] == "skipped" for x in results), "results": results})
+    mode = request.form.get("mode", "skip")
+    if mode not in {"skip", "update", "create"}:
+        raise APIError("批量模式无效")
+    publish = request.form.get("publish", "1").lower() not in {"0", "false", "no", "off"}
+    job_id, path, size = batch_worker.stage_package(file.stream, current_app.config["MAX_CONTENT_LENGTH"])
+    try:
+        batch_worker.enqueue(identity, mode, publish, job_id, path, size)
+    except Exception:
+        batch_worker._safe_unlink(path)
+        raise
+    return jsonify({"jobId": job_id, "status": "queued", "mode": mode, "publish": publish,
+                    "message": "已开始后台处理，可离开页面"}), 202
+
+
+def _job_view(job, identity):
+    if job.owner_id != identity.uid:
+        raise APIError("任务不存在", 404)
+    data = job.progress()
+    data["results"] = json.loads(job.results_json or "[]")
+    return data
+
+
+@api.get("/api/batch/jobs/<job_id>")
+@jwt_required()
+def batch_job_status(job_id):
+    identity = request_identity()
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id or ""):
+        raise APIError("任务不存在", 404)
+    with Session(db.engine) as session:
+        job = session.get(BatchJob, job_id)
+        if not job:
+            raise APIError("任务不存在", 404)
+        return jsonify(_job_view(job, identity))
+
+
+@api.get("/api/batch/jobs")
+@jwt_required()
+def batch_job_list():
+    identity = request_identity()
+    with Session(db.engine) as session:
+        jobs = session.execute(select(BatchJob).where(BatchJob.owner_id == identity.uid)
+                               .order_by(BatchJob.created_at.desc()).limit(20)).scalars().all()
+        return jsonify([job.progress() for job in jobs])
 
 
 @api.post("/api/toolkits/<int:toolkit_id>/favorite")
@@ -759,6 +799,38 @@ def favorites():
                                .order_by(Favorite.created_at.desc())).scalars().all()
     bought = set(db.session.execute(select(Purchase.toolkit_id).where(Purchase.user_id == user.id)).scalars())
     return jsonify(_serialize_list([x for x in items if is_visible(x, user, x.id in bought)], user))
+
+
+@api.put("/api/toolkits/<int:toolkit_id>/rating")
+@jwt_required()
+def rate_toolkit(toolkit_id):
+    """Buyers rate a toolkit 1~5; re-rating overwrites. The aggregate is
+    recomputed under the Toolkit lock, matching the money lock order."""
+    score = json_object().get("score")
+    if type(score) is not int or not 1 <= score <= 5:
+        raise APIError("评分须为 1～5 的整数")
+    identity = request_identity()
+    with Session(db.engine, expire_on_commit=False) as session, session.begin():
+        toolkit = money.lock_toolkit(session, toolkit_id)
+        if not toolkit:
+            raise APIError("工具包不存在", 404)
+        user = money.lock_users(session, [identity.uid])[identity.uid]
+        assert_identity(session, user, identity)
+        if not money.current_purchase(session, user.id, toolkit_id):
+            raise APIError("购买后才能评分", 403, "NOT_PURCHASED")
+        existing = lock_existing_child(session, ToolkitRating, ToolkitRating.id,
+                                       ToolkitRating.user_id == user.id, ToolkitRating.toolkit_id == toolkit_id)
+        if existing:
+            existing.score = score
+        else:
+            session.add(ToolkitRating(user_id=user.id, toolkit_id=toolkit_id, score=score))
+        session.flush()
+        stats = session.execute(select(db.func.count(ToolkitRating.id), db.func.avg(ToolkitRating.score))
+                                .where(ToolkitRating.toolkit_id == toolkit_id)).one()
+        toolkit.rating_count = int(stats[0] or 0)
+        toolkit.rating = Decimal(str(round(float(stats[1] or 5.0), 1))) if stats[0] else Decimal("5.0")
+        result = {"rating": float(toolkit.rating), "ratingCount": toolkit.rating_count, "myScore": score}
+    return jsonify(result)
 
 
 @api.get("/api/me/toolkits")
@@ -903,6 +975,43 @@ def download(toolkit_id):
             # after a response really exists, once under the Toolkit lock.
             response = send_from_directory(directory("resource"), toolkit.resource_path,
                                            as_attachment=True, download_name=toolkit.resource_name or "resource")
+            session.execute(update(Toolkit).where(Toolkit.id == toolkit_id).values(downloads=db.func.coalesce(Toolkit.downloads, 0) + 1))
+    except Exception:
+        if response:
+            response.close()
+        raise
+    return response
+
+
+@api.get("/api/toolkits/<int:toolkit_id>/resources/<int:ref_id>/download")
+@jwt_required()
+def download_resource(toolkit_id, ref_id):
+    """Per-attachment download from the multi-file registry; falls back to the
+    legacy single resource only when the requested ref is that file."""
+    identity = request_identity()
+    response = None
+    try:
+        with Session(db.engine) as session, session.begin():
+            toolkit = money.lock_toolkit(session, toolkit_id)
+            if not toolkit:
+                raise APIError("工具包不存在", 404)
+            user = money.lock_users(session, [identity.uid])[identity.uid]
+            assert_identity(session, user, identity)
+            purchased = money.current_purchase(session, user.id, toolkit_id) is not None
+            if not is_visible(toolkit, user, purchased) or not can_download(toolkit, user, purchased):
+                raise APIError("购买后方可下载", 403)
+            ref = session.execute(select(FileReference).where(FileReference.id == ref_id,
+                                FileReference.toolkit_id == toolkit_id, FileReference.usage == "resource")).scalar_one_or_none()
+            if not ref:
+                raise APIError("附件不存在", 404)
+            asset = session.execute(select(FileAsset).where(FileAsset.id == ref.asset_id).with_for_update()
+                                    .execution_options(populate_existing=True)).scalar_one_or_none()
+            if (not asset or asset.purpose != "resource"
+                    or asset.state not in {"active", "legacy", "retained"}
+                    or not safe_stored_name(asset.stored_name)):
+                raise APIError("附件不存在", 404)
+            response = send_from_directory(directory("resource"), asset.stored_name,
+                                           as_attachment=True, download_name=ref.name or asset.stored_name.split("_", 1)[-1])
             session.execute(update(Toolkit).where(Toolkit.id == toolkit_id).values(downloads=db.func.coalesce(Toolkit.downloads, 0) + 1))
     except Exception:
         if response:

@@ -172,7 +172,8 @@ def _schema_plan(connection):
             "unique": sorted([{"name": idx["name"], "columns": idx["column_names"]} for idx in uniques], key=lambda item: item["name"] or ""),
         }
         by_name = {col["name"]: col for col in columns}
-        supported = {("user", "token_version"), ("wallet_transaction", "event_key")}
+        supported = {("user", "token_version"), ("wallet_transaction", "event_key"), ("toolkit", "rating_count"),
+                     ("file_reference", "name"), ("file_reference", "sort_order")}
         for col in table.columns:
             if col.name not in by_name:
                 if (table.name, col.name) in supported:

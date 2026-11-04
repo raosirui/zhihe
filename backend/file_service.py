@@ -37,7 +37,7 @@ def directory(kind):
 
 def init_storage():
     root = Path(current_app.config["UPLOAD_FOLDER"])
-    for kind in [*KINDS, ".staging"]:
+    for kind in [*KINDS, ".staging", ".batches"]:
         (root / kind).mkdir(parents=True, exist_ok=True)
 
 
@@ -282,7 +282,8 @@ def lock_assets(session, asset_ids):
     return rows
 
 
-def bind_reference(session, asset, identity, toolkit_id, usage, lesson_id=None, preserve=False):
+def bind_reference(session, asset, identity, toolkit_id, usage, lesson_id=None, preserve=False,
+                   name=None, sort_order=0, binding_key=None):
     if not asset or asset.state not in {"ready", "active", "retained", "legacy"}:
         raise APIError("文件不可用", 409)
     owned = asset.owner_id == identity.uid
@@ -297,8 +298,9 @@ def bind_reference(session, asset, identity, toolkit_id, usage, lesson_id=None, 
     elif usage == "lesson":
         if not preserve and (asset.purpose not in {"asset", "image"} or not (owned or (asset.purpose == "image" and asset.is_public))):
             raise APIError("无权绑定此教程图片", 403)
-    key = f"lesson:{lesson_id}:image" if usage == "lesson" else f"toolkit:{toolkit_id}:{usage}"
-    session.add(FileReference(asset_id=asset.id, toolkit_id=toolkit_id, lesson_id=lesson_id, usage=usage, binding_key=key))
+    key = binding_key or (f"lesson:{lesson_id}:image" if usage == "lesson" else f"toolkit:{toolkit_id}:{usage}")
+    session.add(FileReference(asset_id=asset.id, toolkit_id=toolkit_id, lesson_id=lesson_id,
+                              usage=usage, binding_key=key, name=name, sort_order=sort_order))
     if asset.state != "legacy":
         asset.state = "active"
     for operation in session.execute(select(FileOperation).where(FileOperation.asset_id == asset.id, FileOperation.action == "upload")).scalars():

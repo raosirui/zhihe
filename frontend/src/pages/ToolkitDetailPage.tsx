@@ -12,6 +12,7 @@ export function ToolkitDetailPage() {
   const { id } = useParams(); const navigate = useNavigate(); const { user, loading } = useAuth(); const { openAuth } = useOutletContext<{ openAuth: () => void }>()
   const scope = useRequestScope(id)
   const [loaded, setLoaded] = useState<{ key: string; item: Toolkit }>(), [busy, setBusy] = useState(false), [favoriteBusy, setFavoriteBusy] = useState(false), [error, setError] = useState(''), [retry, setRetry] = useState(0)
+  const [myScore, setMyScore] = useState(0), [scoreBusy, setScoreBusy] = useState(false)
   const buying = useRef(false), favoriting = useRef(false)
   const wallet = useScopedData<{ canPay?: boolean; demoEnabled?: boolean }>('/wallet')
   const purchaseEnabled = !user || (!!wallet.data && wallet.data.canPay !== false && wallet.data.demoEnabled !== false)
@@ -48,11 +49,22 @@ export function ToolkitDetailPage() {
     finally { if (request.current()) { buying.current = false; setBusy(false) } }
   }
   const start = () => { if (unlocked) navigate(`/toolkits/${item.id}/learn`); else void buy() }
-  const download = async () => {
+  const download = async (path: string, filename: string) => {
     if (!user) return openAuth()
     const request = scope.begin('download')
-    try { await downloadAuthed(`/toolkits/${item.id}/download`, item.resourceName || 'toolkit-resource', request) }
+    try { await downloadAuthed(path, filename, request) }
     catch (e) { if (request.current()) toast.error((e as Error).message) }
+  }
+  const resources = item.resources?.length ? item.resources : item.resourceName ? [{ refId: 0, name: item.resourceName, size: 0, locked: !downloadable, downloadUrl: `/toolkits/${item.id}/download` }] : []
+  const rate = async (score: number) => {
+    if (!user) return openAuth()
+    if (scoreBusy) return
+    setScoreBusy(true); const request = scope.begin('rate')
+    try {
+      const result = await api<{ rating: number; ratingCount: number }>(`/toolkits/${item.id}/rating`, { method: 'PUT', body: JSON.stringify({ score }), signal: request.signal })
+      if (request.current()) { setMyScore(score); setLoaded(prev => prev && { ...prev, item: { ...prev.item, rating: result.rating, ratingCount: result.ratingCount } }); toast.success('评分已提交，感谢反馈') }
+    } catch (e) { if (request.current()) toast.error((e as Error).message) }
+    finally { if (request.current()) setScoreBusy(false) }
   }
   return <div className="pb-12">
     <div className="bg-ink text-white"><div className="mx-auto max-w-[1240px] px-4 py-6 sm:px-6 lg:px-8"><Link to="/toolkits" className="inline-flex items-center gap-2 text-sm text-white/50 hover:text-white"><ArrowLeft size={16} />返回工具库</Link><div className="mt-7 grid gap-9 pb-8 lg:grid-cols-[1.1fr_.9fr] lg:items-center">
@@ -62,7 +74,21 @@ export function ToolkitDetailPage() {
     <div className="mx-auto grid max-w-[1240px] gap-7 px-4 py-8 sm:px-6 lg:grid-cols-[1fr_350px] lg:px-8">
       <div className="space-y-7"><section className="panel p-6 sm:p-8"><h2 className="text-xl font-black text-ink">工具包介绍</h2><div className="mt-4 whitespace-pre-line text-sm leading-8 text-slate-600">{item.description}</div><div className="mt-6 flex flex-wrap gap-2">{item.tags.map(x => <span key={x} className="chip bg-slate-100 text-slate-500">#{x}</span>)}</div></section>
         <section className="panel p-6 sm:p-8"><div className="flex items-center justify-between"><h2 className="text-xl font-black text-ink">学习目录</h2><span className="text-xs text-slate-400">约 {item.lessons?.reduce((a, x) => a + x.duration, 0) ?? 0} 分钟</span></div><div className="mt-5 divide-y">{item.lessons?.map((lesson, index) => <div key={lesson.id} className="flex items-center gap-4 py-4"><span className={cn('grid size-9 shrink-0 place-items-center rounded-xl text-xs font-black', !lesson.locked ? 'bg-mint text-ink' : 'bg-slate-100 text-slate-400')}>{String(index + 1).padStart(2, '0')}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-700">{lesson.title}</p><p className="mt-1 text-xs text-slate-400"><Clock3 size={12} className="mr-1 inline" />{lesson.duration} 分钟 {lesson.isPreview && <span className="ml-2 text-emerald-700">可试看</span>}</p></div>{lesson.locked ? <LockKeyhole size={16} className="text-slate-300" /> : <Link className="btn-ghost text-xs" to={`/toolkits/${item.id}/learn?lesson=${lesson.id}`}>{lesson.isPreview && !unlocked ? '试看' : '学习'}<CheckCircle2 size={17} className="text-emerald-600" /></Link>}</div>)}</div></section>
-        <section className="panel p-6 sm:p-8"><div className="flex items-center gap-4"><span className="grid size-12 place-items-center rounded-2xl bg-emerald-100 text-emerald-700"><FileArchive size={22} /></span><div className="flex-1"><h2 className="font-black text-ink">配套资源</h2><p className="mt-1 text-xs text-slate-400">{item.resourceName || '作者尚未上传可下载文件'}</p></div><button disabled={!downloadable || !item.resourceName} onClick={download} className="btn-ghost"><Download size={16} />下载</button></div></section>
+        <section className="panel p-6 sm:p-8"><h2 className="font-black text-ink">配套资源</h2><p className="mt-1 text-xs text-slate-400">脚本仅作附件下载，不会在平台执行</p>
+          <div className="mt-4 space-y-2">{resources.length ? resources.map((x, i) => <div key={x.refId || i} className="flex items-center gap-3 rounded-2xl border bg-slate-50/60 px-4 py-3">
+            <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-emerald-100 text-emerald-700"><FileArchive size={16} /></span>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-ink">{x.name}</p>{x.size > 0 && <p className="mt-0.5 text-xs text-slate-400">{(x.size / 1024 / 1024).toFixed(2)} MB</p>}</div>
+            {x.locked ? <span className="chip bg-slate-100 text-slate-400"><LockKeyhole size={12} />购买后可下载</span> : <button className="btn-ghost text-xs" onClick={() => void download(x.downloadUrl || `/toolkits/${item.id}/download`, x.name)}><Download size={14} />下载</button>}
+          </div>) : <p className="rounded-2xl bg-slate-50 px-4 py-6 text-center text-sm text-slate-400">作者尚未上传可下载文件</p>}</div>
+        </section>
+        <section className="panel p-6 sm:p-8"><h2 className="font-black text-ink">工具包评分</h2>
+          <div className="mt-3 flex items-center gap-3">
+            <p className="text-3xl font-black text-ink">{Number(item.rating).toFixed(1)}</p>
+            <div>{[1, 2, 3, 4, 5].map(n => <Star key={n} size={16} className={n <= Math.round(item.rating) ? 'inline fill-amber-400 text-amber-400' : 'inline text-slate-300'} />)}
+              <p className="mt-1 text-xs text-slate-400">{item.ratingCount ? `${item.ratingCount} 人评分` : '购买后即可评分'}</p></div>
+            {item.purchased && <div className="ml-auto flex items-center gap-1">{[1, 2, 3, 4, 5].map(n => <button key={n} disabled={scoreBusy} aria-label={`评 ${n} 分`} onClick={() => void rate(n)} className="p-1"><Star size={20} className={n <= myScore ? 'fill-pine text-pine' : 'text-slate-300 hover:text-amber-400'} /></button>)}</div>}
+          </div>
+        </section>
       </div>
       <aside><div className="panel sticky top-24 p-6"><p className="text-xs font-bold text-slate-400">完整工具包</p><div className="mt-2 text-3xl font-black text-ink">{money(item.price)}</div>{!unlocked && <p className="mt-2 text-xs text-slate-400">购买后永久解锁完整教程和配套资源</p>}{!unlocked && wallet.data && !purchaseEnabled && <p role="alert" className="mt-4 text-sm text-amber-800">当前未开放模拟交易，尚未接入真实支付；可试看已开放教程。</p>}{!unlocked && wallet.error && <p role="alert" className="mt-4 text-sm text-red-600">购买能力读取失败<button className="btn-ghost" onClick={wallet.reload}>重试</button></p>}<button disabled={busy || (!unlocked && !purchaseEnabled)} onClick={start} className="btn-mint mt-6 w-full py-3.5">{unlocked ? '开始学习' : busy ? '正在创建订单…' : '立即购买'} <ArrowRight size={17} /></button>{preview && !unlocked && <Link className="btn-primary mt-3 w-full" to={`/toolkits/${item.id}/learn?lesson=${preview.id}`}><PlayCircle size={16} />免费试看</Link>}<button disabled={favoriteBusy} onClick={favorite} className="btn-ghost mt-3 w-full"><Bookmark size={16} className={item.favorited ? 'fill-pine text-pine' : ''} />{item.favorited ? '已收藏' : '收藏工具包'}</button><div className="mt-6 space-y-3 border-t pt-5 text-xs text-slate-500"><p><ShieldCheck size={15} className="mr-2 inline text-emerald-600" />钱包余额结算，平台暂不支持退款</p><p><BookOpen size={15} className="mr-2 inline text-emerald-600" />已购内容下架后仍可学习</p><p><Download size={15} className="mr-2 inline text-emerald-600" />配套资源一键下载</p></div></div></aside>
     </div>

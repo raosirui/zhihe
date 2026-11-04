@@ -91,6 +91,26 @@ def batch_item(title, **extra):
                         {"title": "full", "content": "paid body", "preview": False}], **extra}
 
 
+def run_batch(env, zip_stream, name="package.zip", form=None):
+    """Upload via the async route, drain the worker inline, return the job report."""
+    app, client, _, headers, _ = env
+    import batch_worker
+    data = {"package": (zip_stream, name)}
+    data.update(form or {})
+    response = client.post("/api/batch/upload", data=data, headers=headers["seller"])
+    assert response.status_code == 202, response.json
+    job_id = response.json["jobId"]
+    with app.app_context():
+        while True:
+            claimed = batch_worker.claim("test-worker")
+            if claimed is None:
+                break
+            batch_worker.load_and_process(app, claimed)
+    report = client.get(f"/api/batch/jobs/{job_id}", headers=headers["seller"])
+    assert report.status_code == 200
+    return report.json
+
+
 def test_import_and_factory_no_io(tmp_path):
     script = """
 import os,socket
@@ -331,10 +351,10 @@ def test_file_batch_shared_cover_and_protected_images(env):
     first = batch_item("first", cover="shared.png")
     first["lessons"][0]["image"] = "shared.png"
     first["lessons"][1]["image"] = "private.png"
-    response = client.post("/api/batch/upload", data={"package": (package([first, batch_item("second", cover="shared.png")],
-                           {"shared.png": png_bytes(), "private.png": png_bytes()}), "package.zip")}, headers=headers["seller"])
-    assert response.status_code == 200 and response.json["created"] == 2, response.json
-    tids = [x["toolkitId"] for x in response.json["results"]]
+    response = run_batch(env, package([first, batch_item("second", cover="shared.png")],
+                           {"shared.png": png_bytes(), "private.png": png_bytes()}))
+    assert response["created"] == 2, response
+    tids = [x["toolkitId"] for x in response["results"]]
     detail = client.get(f"/api/toolkits/{tids[0]}", headers=headers["seller"]).json
     assert "?" not in detail["lessons"][0]["image"]
     assert client.get(detail["lessons"][0]["image"]).status_code == 200
@@ -363,8 +383,8 @@ def test_file_batch_shared_cover_and_protected_images(env):
 def test_actual_image_and_svg_failures_cleanup(env, bad):
     app, client, _, headers, uploads = env
     name = "bad.svg" if bad.startswith(b"<") else "bad.png"
-    response = client.post("/api/batch/upload", data={"package": (package([batch_item("bad", cover=name)], {name: bad}), "bad.zip")}, headers=headers["seller"])
-    assert response.status_code == 200 and response.json["created"] == 0 and response.json["failed"] == 1, response.json
+    response = run_batch(env, package([batch_item("bad", cover=name)], {name: bad}), "bad.zip")
+    assert response["created"] == 0 and response["failed"] == 1, response
     with app.app_context():
         assert Toolkit.query.count() == 0
         assert FileReference.query.count() == 0
@@ -375,10 +395,10 @@ def test_actual_image_and_svg_failures_cleanup(env, bad):
 def test_batch_counts_skipped_and_commit_ack_recovery(env, monkeypatch):
     app, client, _, headers, _ = env
     archive = lambda: package([batch_item("one"), batch_item("bad", price="NaN")])
-    first = client.post("/api/batch/upload", data={"package": (archive(), "pack.zip")}, headers=headers["seller"])
-    assert (first.json["created"], first.json["failed"], first.json["skipped"]) == (1, 1, 0)
-    again = client.post("/api/batch/upload", data={"package": (archive(), "pack.zip")}, headers=headers["seller"])
-    assert (again.json["created"], again.json["failed"], again.json["skipped"]) == (0, 1, 1)
+    first = run_batch(env, archive(), "pack.zip")
+    assert (first["created"], first["failed"], first["skipped"]) == (1, 1, 0)
+    again = run_batch(env, archive(), "pack.zip")
+    assert (again["created"], again["failed"], again["skipped"]) == (0, 1, 1)
     original = SessionTransaction.commit
     injected = {"done": False}
     def lost_ack(transaction, *args, **kwargs):
@@ -398,9 +418,9 @@ def test_batch_counts_skipped_and_commit_ack_recovery(env, monkeypatch):
 def test_valid_passive_svg_compatibility(env):
     _, client, _, headers, _ = env
     svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="0 0 80 40"><defs><linearGradient id="g"><stop offset="0" stop-color="#fff"/></linearGradient></defs><rect width="80" height="40" fill="url(#g)"/><text x="5" y="20">safe</text></svg>'
-    response = client.post("/api/batch/upload", data={"package": (package([batch_item("passive", cover="safe.svg")], {"safe.svg": svg}), "svg.zip")}, headers=headers["seller"])
-    assert response.status_code == 200 and response.json["created"] == 1, response.json
-    tid = response.json["results"][0]["toolkitId"]
+    response = run_batch(env, package([batch_item("passive", cover="safe.svg")], {"safe.svg": svg}), "svg.zip")
+    assert response["created"] == 1, response
+    tid = response["results"][0]["toolkitId"]
     cover = client.get(f"/api/toolkits/{tid}").json["cover"]
     image = client.get(cover)
     assert image.status_code == 200 and image.data == svg
@@ -474,10 +494,10 @@ def test_file_quota_and_skipped_does_not_reserve(env):
     app, client, _, headers, uploads = env
     app.config["FILE_USER_QUOTA"] = 5
     item = batch_item("full", resource="tiny.py")
-    response = client.post("/api/batch/upload", data={"package": (package([item], {"tiny.py": b"12345"}), "p.zip")}, headers=headers["seller"])
-    assert response.json["created"] == 1, response.json
-    retry = client.post("/api/batch/upload", data={"package": (package([item], {"tiny.py": b"12345"}), "p.zip")}, headers=headers["seller"])
-    assert retry.json["skipped"] == 1 and retry.json["failed"] == 0, retry.json
+    response = run_batch(env, package([item], {"tiny.py": b"12345"}), "p.zip")
+    assert response["created"] == 1, response
+    retry = run_batch(env, package([item], {"tiny.py": b"12345"}), "p.zip")
+    assert retry["skipped"] == 1 and retry["failed"] == 0, retry
     over = client.post("/api/toolkits", data={"title": "over", "description": "desc", "resource": (io.BytesIO(b"1"), "more.py")}, headers=headers["seller"])
     assert over.status_code == 409, over.json
     with app.app_context():
@@ -679,8 +699,8 @@ def test_review_admin_private_image_roundtrip_is_same_lesson_only(env):
     item = batch_item("private roundtrip")
     item["lessons"][0]["image"] = "first.png"
     item["lessons"][1]["image"] = "second.png"
-    result = client.post("/api/batch/upload", data={"package": (package([item], {"first.png": png_bytes(), "second.png": png_bytes()}), "p.zip")}, headers=headers["seller"])
-    tid = result.json["results"][0]["toolkitId"]
+    result = run_batch(env, package([item], {"first.png": png_bytes(), "second.png": png_bytes()}), "p.zip")
+    tid = result["results"][0]["toolkitId"]
     detail = client.get(f"/api/toolkits/{tid}", headers=headers["admin"]).json
     payload = {k: detail[k] for k in ["title", "description", "summary", "category", "level", "price", "cover", "lessons"]}
     payload["tags"] = ",".join(detail["tags"])
@@ -767,10 +787,10 @@ def test_review_chinese_image_resource_upload_roundtrip(env):
     app, client, _, headers, uploads = env
     item = batch_item("中文文件", cover="covers/封面.png", resource="resources/脚本.py")
     item["lessons"][0]["image"] = "images/步骤.png"
-    response = client.post("/api/batch/upload", data={"package": (package([item], {
-        "covers/封面.png": png_bytes(), "images/步骤.png": png_bytes(), "resources/脚本.py": b"print('safe attachment')"}), "中文包.zip")}, headers=headers["seller"])
-    assert response.status_code == 200 and response.json["created"] == 1, response.json
-    tid = response.json["results"][0]["toolkitId"]
+    response = run_batch(env, package([item], {
+        "covers/封面.png": png_bytes(), "images/步骤.png": png_bytes(), "resources/脚本.py": b"print('safe attachment')"}), "中文包.zip")
+    assert response["created"] == 1, response
+    tid = response["results"][0]["toolkitId"]
     detail = client.get(f"/api/toolkits/{tid}", headers=headers["seller"]).json
     assert detail["cover"].endswith(".png")
     assert client.get(detail["cover"]).status_code == 200
