@@ -1,7 +1,8 @@
 export type User = { id: number; username: string; nickname: string; role: 'admin' | 'user'; avatar?: string; bio: string; balance: number; frozenBalance: number }
-export type Lesson = { id: number; title: string; content?: string | null; image?: string | null; sortOrder: number; duration: number; isPreview: boolean; locked: boolean }
+export type Lesson = { id: number; title: string; content?: string | null; image?: string | null; sortOrder: number; duration: number; isPreview: boolean; locked: boolean; contentType?: string; convertedHtml?: string | null; rawFileUrl?: string | null }
 export type ToolkitResource = { refId: number; name: string; size: number; locked: boolean; downloadUrl?: string }
 export type Toolkit = { id: number; title: string; slug: string; summary: string; description?: string; category: string; level: string; cover?: string; price: number; author: { id: number; nickname: string; avatar?: string }; downloads: number; rating: number; ratingCount?: number; featured: boolean; tags: string[]; status: string; purchased: boolean; canLearn?: boolean; canPreview?: boolean; canDownload?: boolean; favorited: boolean; lessonCount: number; lessons?: Lesson[]; resourceName?: string; resources?: ToolkitResource[]; createdAt: string }
 export type Order = { id: number; orderNo: string; amount: number; commission: number; status: 'pending' | 'paid' | 'cancelled' | 'refunded'; toolkit: { id: number; title: string; cover?: string; status?: string }; canPay?: boolean; seller: string; buyer?: string; createdAt: string; paidAt?: string }
 export type Transaction = { id: number; type: 'recharge' | 'purchase' | 'commission' | 'withdrawal' | 'refund'; amount: number; balanceAfter: number; note: string; createdAt: string }
+
 

@@ -115,14 +115,23 @@ class Lesson(db.Model):
     sort_order = db.Column(db.Integer, default=0)
     duration = db.Column(db.Integer, default=10)
     is_preview = db.Column(db.Boolean, default=False)
+    content_type = db.Column(db.String(20), nullable=False, default="markdown")
+    raw_file_path = db.Column(db.String(500))
+    converted_html = deferred(db.Column(long_text()))
 
     def serialize(self, can_view=False):
         image = self.image if can_view else None
         if image and image.startswith("file:"):
             image = f"{LESSON_ASSET_PATH}{image[5:]}"
-        return {"id": self.id, "title": self.title, "sortOrder": self.sort_order,
+        data = {"id": self.id, "title": self.title, "sortOrder": self.sort_order,
                 "duration": self.duration, "isPreview": self.is_preview, "locked": not can_view,
-                "canLearn": bool(can_view), "content": self.content if can_view else None, "image": image}
+                "canLearn": bool(can_view), "contentType": self.content_type or "markdown",
+                "content": self.content if can_view else None, "image": image}
+        if can_view:
+            data["convertedHtml"] = self.converted_html
+            if self.raw_file_path:
+                data["rawFileUrl"] = f"/api/lesson-raw/{self.id}"
+        return data
 
 
 Toolkit.lesson_count = column_property(db.select(db.func.count(Lesson.id)).where(
@@ -306,3 +315,4 @@ class BatchJob(db.Model):
                 "total": self.total, "processed": self.processed, "created": self.created,
                 "updated": self.updated, "skipped": self.skipped, "failed": self.failed,
                 "error": self.error, "createdAt": self.created_at.isoformat() if self.created_at else None}
+

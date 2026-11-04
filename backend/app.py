@@ -33,6 +33,7 @@ from security import (APIError, current_user, optional_user, optional_user_id, a
                       positive_id, rate_hits, rate_hit, client_ip, account_rate_key, lock_existing_child)
 from access import is_manager, is_visible, can_learn, can_download
 import money_service as money
+from document_converter import detect_content_type, convert_document, save_raw_file, is_allowed_extension
 from file_service import (UploadContext, directory, init_storage, safe_stored_name, source_asset,
                           lock_assets, bind_reference, unbind_toolkit, referenced_asset_ids,
                           reclaim_asset, recover_file_operations)
@@ -362,8 +363,36 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False,
                 lesson = previous or Lesson(toolkit_id=toolkit.id)
                 lesson.title, lesson.content, lesson.image = data["title"], data["content"], url
                 lesson.duration, lesson.sort_order, lesson.is_preview = data["duration"], index, data["preview"]
+
+                # Handle document file upload and conversion
+                lesson_file = data.get("_file")
+                if lesson_file and hasattr(lesson_file, "filename") and lesson_file.filename:
+                    content_type = detect_content_type(lesson_file.filename)
+                    if not content_type:
+                        raise APIError("不支持的文档格式")
+                    lesson.content_type = content_type
+                    # Save after flush to get lesson.id
+                elif "content_type" in data and data["content_type"]:
+                    lesson.content_type = data["content_type"]
+                else:
+                    lesson.content_type = "markdown"
+
                 session.add(lesson)
                 session.flush()
+
+                # Handle document conversion after lesson is created
+                if lesson_file and hasattr(lesson_file, "filename") and lesson_file.filename:
+                    upload_folder = current_app.config["UPLOAD_FOLDER"]
+                    raw_path = save_raw_file(lesson_file, upload_folder, lesson.id)
+                    lesson.raw_file_path = raw_path
+                    try:
+                        converted_html = convert_document(raw_path, lesson.content_type)
+                        lesson.converted_html = converted_html
+                        lesson.content = f"[Document: {lesson_file.filename}]"  # Placeholder
+                    except Exception as e:
+                        current_app.logger.error(f"Document conversion failed: {e}")
+                        lesson.converted_html = f"<p>文档转换失败：{str(e)}</p>"
+
                 if asset_id:
                     bind_reference(session, assets[asset_id], identity, toolkit.id, "lesson", lesson.id, preserve=preserved_image)
             session.flush()
@@ -551,6 +580,18 @@ def _single_item(partial=False):
     status = data.get("status") if not partial else None
     if status is not None and status not in {"draft", "published"}:
         raise APIError("状态无效")
+    # Extract lesson document files (lesson_file_0, lesson_file_1, etc.)
+    lesson_files = []
+    for i in range(len(lessons) if lessons else 0):
+        file = request.files.get(f"lesson_file_{i}")
+        lesson_files.append(file if file and file.filename else None)
+
+    # Add lesson_files to lessons data
+    if lessons:
+        for i, lesson in enumerate(lessons):
+            if i < len(lesson_files) and lesson_files[i]:
+                lesson["_file"] = lesson_files[i]
+
     return {**fields, "cover_file": None, "resource_files": [], "resource_streams": streams,
             "status": status, "lessons": lessons}
 
@@ -1097,3 +1138,23 @@ if __name__ == "__main__":
     if application.config["APP_ENV"] != "development":
         raise RuntimeError("The built-in server is development-only; use WSGI in production")
     application.run(host="127.0.0.1", port=6000, debug=application.config["DEBUG"])
+
+@api.get("/api/lesson-raw/<int:lesson_id>")
+@jwt_required()
+def download_lesson_raw(lesson_id):
+    """Download original document file for a lesson."""
+    user = current_user()
+    lesson = db.session.get(Lesson, lesson_id)
+    if not lesson or not lesson.raw_file_path:
+        raise APIError("原始文件不存在", 404)
+    toolkit = lesson.toolkit
+    purchased = _purchased(db.session, user, toolkit.id)
+    if not is_visible(toolkit, user, purchased) or not can_learn(toolkit, user, purchased, lesson):
+        raise APIError("无权访问", 403)
+    if not os.path.exists(lesson.raw_file_path):
+        raise APIError("原始文件已丢失", 404)
+    return send_file(lesson.raw_file_path, as_attachment=True)
+
+
+
+
