@@ -1,4 +1,13 @@
-import ReactMarkdown from "react-markdown"
+import { lazy, Suspense, useMemo } from 'react'
+import DOMPurify from 'dompurify'
+import ReactMarkdown from 'react-markdown'
+import rehypeSanitize from 'rehype-sanitize'
+import remarkGfm from 'remark-gfm'
+import { OriginalDownload } from './OriginalDownload'
+import { lessonRawPath } from './protectedDocumentFetch'
+
+const PdfReader = lazy(() => import('./PdfReader'))
+const PptReader = lazy(() => import('./PptReader'))
 
 type Props = {
   contentType?: string
@@ -7,79 +16,32 @@ type Props = {
   rawFileUrl?: string | null
 }
 
-export function DocumentRenderer({ contentType, content, convertedHtml, rawFileUrl }: Props) {
-  switch (contentType) {
-    case "word":
-    case "html":
-    case "richtext":
-      if (convertedHtml) {
-        return <div className="document-content prose max-w-none" dangerouslySetInnerHTML={{ __html: convertedHtml }} />
-      }
-      break
-    case "pdf":
-      if (rawFileUrl) {
-        return (
-          <div className="document-content">
-            <iframe
-              src={rawFileUrl}
-              className="w-full h-[80vh] border-0"
-              title="PDF Viewer"
-            />
-            <div className="mt-4 text-center">
-              <a
-                href={rawFileUrl}
-                download
-                className="inline-block px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-              >
-                下载 PDF
-              </a>
-            </div>
-          </div>
-        )
-      }
-      break
-    case "ppt":
-      if (convertedHtml) {
-        return (
-          <div className="document-content">
-            <style>{`
-              .ppt-slide {
-                background: white;
-                border: 1px solid #e5e7eb;
-                border-radius: 0.5rem;
-                padding: 2rem;
-                margin-bottom: 1.5rem;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-              }
-              .ppt-slide h3 {
-                color: #374151;
-                font-size: 1.25rem;
-                font-weight: 600;
-                margin-bottom: 1rem;
-                padding-bottom: 0.5rem;
-                border-bottom: 2px solid #e5e7eb;
-              }
-            `}</style>
-            <div dangerouslySetInnerHTML={{ __html: convertedHtml }} />
-          </div>
-        )
-      }
-      break
-    case "markdown":
-    default:
-      if (content) {
-        return (
-          <div className="prose max-w-none">
-            <ReactMarkdown>{content}</ReactMarkdown>
-          </div>
-        )
-      }
-      break
-  }
+function SemanticDocument({ content, convertedHtml, contentType, rawFileUrl, download = false }: Props & { download?: boolean }) {
+  // The server sanitizes conversions, but a client-side allowlist also protects
+  // older documents and fallback HTML in case stored content predates that policy.
+  const safeHtml = useMemo(() => convertedHtml ? DOMPurify.sanitize(convertedHtml, {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['iframe', 'style', 'form', 'object', 'embed'],
+    FORBID_ATTR: ['style'],
+  }) : '', [convertedHtml])
+  const preferHtml = Boolean(safeHtml) && (contentType !== 'markdown' || content?.startsWith('[Document:'))
+  return <div className="document-content prose max-w-none">
+    {preferHtml ? <div dangerouslySetInnerHTML={{ __html: safeHtml }} /> : content && !content.startsWith('[Document:') ?
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{content}</ReactMarkdown> :
+      safeHtml ? <div dangerouslySetInnerHTML={{ __html: safeHtml }} /> : <p>暂无可预览的文档文字。</p>}
+    {download && <OriginalDownload rawFileUrl={rawFileUrl} contentType={contentType} />}
+  </div>
+}
 
-  // Fallback
-  if (content) {
-    return <div className="prose max-w-none">{content}</div>
+export function DocumentRenderer({ contentType, content, convertedHtml, rawFileUrl }: Props) {
+  const fallback = <SemanticDocument content={content} convertedHtml={convertedHtml} contentType={contentType} />
+  if (rawFileUrl && lessonRawPath(rawFileUrl)) {
+    if (contentType === 'pdf') return <Suspense fallback={<p role="status">正在准备 PDF 阅读器…</p>}>
+      <PdfReader rawFileUrl={rawFileUrl} fallback={fallback} hasText={Boolean(convertedHtml || (content && !content.startsWith('[Document:')))} />
+    </Suspense>
+    if (contentType === 'ppt') return <Suspense fallback={<p role="status">正在准备演示文稿…</p>}>
+      <PptReader rawFileUrl={rawFileUrl} fallback={fallback} />
+    </Suspense>
   }
-  return <div className="text-gray-500">暂无内容</div>
+  return <SemanticDocument contentType={contentType} content={content} convertedHtml={convertedHtml} rawFileUrl={rawFileUrl} download />
 }

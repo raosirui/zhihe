@@ -126,7 +126,7 @@ assert application.config['SQLALCHEMY_DATABASE_URI']=='sqlite:///:memory:'
 assert application.config['JWT_TOKEN_LOCATION']==['headers']
 """ % str(tmp_path / "must-not-exist")
     subprocess.run([sys.executable, "-c", script], env={**os.environ, "PYTHONPATH": str(ROOT),
-                   "PYTHONDONTWRITEBYTECODE": "1"}, check=True, capture_output=True)
+                   "PYTHONDONTWRITEBYTECODE": "1"}, cwd=ROOT, check=True, capture_output=True)
     assert not (tmp_path / "must-not-exist").exists()
 
 

@@ -10,7 +10,7 @@ type AuthValue = {
   restoreError: string | null
   sessionVersion: number
   login: (username: string, password: string, caller?: AuthCaller) => Promise<void>
-  register: (username: string, password: string, nickname: string, caller?: AuthCaller) => Promise<void>
+  register: (username: string, password: string, email?: string, caller?: AuthCaller) => Promise<void>
   logout: () => void
   refresh: () => Promise<void>
 }
@@ -76,7 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally { caller.signal?.removeEventListener('abort', request.cancel) }
   }, [begin])
   const login = useCallback((username: string, password: string, caller?: AuthCaller) => authenticate('/auth/login', { username, password }, caller), [authenticate])
-  const register = useCallback((username: string, password: string, nickname: string, caller?: AuthCaller) => authenticate('/auth/register', { username, password, nickname }, caller), [authenticate])
+  const register = useCallback((username: string, password: string, email?: string, caller?: AuthCaller) => authenticate('/auth/register', { username, password, email }, caller), [authenticate])
   const logout = useCallback(() => {
     // fetch captures the old token before synchronously invalidating local work.
     if (getToken()) void api('/auth/logout', { method: 'POST' }).catch(() => {})

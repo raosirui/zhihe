@@ -113,6 +113,15 @@ describe('learning space', () => {
     expect(result.container.querySelector('script')).toBeNull()
     expect(screen.getByText('evil')).not.toHaveAttribute('href', 'javascript:alert(1)')
   })
+  it('keeps GFM lists and wide tables inside the responsive article', async () => {
+    const content = '## Checklist\n\n- First item\n- Second item\n\n| Name | Value |\n| --- | --- |\n| PBMC | 1000 |'
+    mockFetch(({ path }) => path === '/toolkits/1' ? json(toolkit(1, [{ ...lesson(11), content }])) : undefined)
+    const result = renderPage(<LearnPage />, '/toolkits/:id/learn', '/toolkits/1/learn')
+    expect(await screen.findByRole('heading', { name: 'Checklist' })).toBeInTheDocument()
+    expect(result.container.querySelector('.lesson-document .document-content ul li')).toHaveTextContent('First item')
+    expect(result.container.querySelector('.lesson-document .document-content table')).toHaveTextContent('PBMC')
+    expect(result.container.querySelector('main article')).toHaveClass('max-w-4xl')
+  })
 })
 
 describe('protected images', () => {

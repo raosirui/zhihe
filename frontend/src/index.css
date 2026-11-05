@@ -22,8 +22,204 @@
   .chip { @apply inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold; }
 }
 
-.markdown h2, .markdown h3 { margin: 1.5rem 0 .75rem; font-weight: 800; color: #0a1f1a; }
-.markdown p { margin: .8rem 0; line-height: 1.9; color: #475569; }
-.markdown li { margin: .45rem 0; color: #475569; }
-.markdown blockquote { margin: 1.25rem 0; border-left: 3px solid #b9f36a; background: #f5fbe9; padding: 1rem; color: #335048; }
+.lesson-document { min-width: 0; }
+.lesson-document .document-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #334155;
+  font-size: 1rem;
+  line-height: 1.85;
+}
+.lesson-document .document-content > :first-child { margin-top: 0; }
+.lesson-document .document-content > :last-child { margin-bottom: 0; }
+.lesson-document .document-content :is(h1, h2, h3, h4, h5, h6) {
+  margin: 1.7em 0 .6em;
+  color: #0a1f1a;
+  font-weight: 800;
+  line-height: 1.35;
+  scroll-margin-top: 5rem;
+}
+.lesson-document .document-content h1 { font-size: clamp(1.55rem, 4vw, 2rem); }
+.lesson-document .document-content h2 { font-size: clamp(1.3rem, 3vw, 1.6rem); }
+.lesson-document .document-content h3 { font-size: 1.2rem; }
+.lesson-document .document-content :is(h4, h5, h6) { font-size: 1.05rem; }
+.lesson-document .document-content :is(p, ul, ol, blockquote, pre, table, figure) { margin: 1em 0; }
+.lesson-document .document-content :is(ul, ol) { padding-left: 1.6em; }
+.lesson-document .document-content ul { list-style: disc outside; }
+.lesson-document .document-content ol { list-style: decimal outside; }
+.lesson-document .document-content ul ul { list-style-type: circle; }
+.lesson-document .document-content :is(ul, ol) :is(ul, ol) { margin: .35em 0; }
+.lesson-document .document-content li { padding-left: .2em; margin: .35em 0; }
+.lesson-document .document-content li > p { margin: .25em 0; }
+.lesson-document .document-content .contains-task-list { list-style: none; }
+.lesson-document .document-content .task-list-item { padding-left: 0; }
+.lesson-document .document-content input[type="checkbox"] { margin-right: .5em; accent-color: #167759; }
+.lesson-document .document-content a { color: #047857; text-decoration: underline; text-underline-offset: .2em; }
+.lesson-document .document-content a:hover { color: #065f46; }
+.lesson-document .document-content blockquote {
+  border-left: 3px solid #b9f36a;
+  background: #f5fbe9;
+  padding: .7em 1.1em;
+  color: #335048;
+}
+.lesson-document .document-content blockquote > :first-child { margin-top: 0; }
+.lesson-document .document-content blockquote > :last-child { margin-bottom: 0; }
+.lesson-document .document-content :not(pre) > code {
+  border-radius: .3em;
+  background: #f1f5f9;
+  padding: .12em .32em;
+  font-size: .9em;
+  overflow-wrap: anywhere;
+}
+.lesson-document .document-content pre {
+  max-width: 100%;
+  overflow: auto;
+  border-radius: .8rem;
+  background: #0f172a;
+  padding: 1.1rem 1.3rem;
+  color: #e2e8f0;
+  line-height: 1.55;
+  font-size: .88em;
+  overflow-wrap: normal;
+}
+.lesson-document .document-content pre code { white-space: pre; }
+.lesson-document .document-content table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  border: 1px solid #cbd5e1;
+  font-size: .94em;
+  overflow-wrap: normal;
+}
+.lesson-document .document-content :is(th, td) {
+  min-width: 5rem;
+  border: 1px solid #cbd5e1;
+  padding: .55rem .8rem;
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lesson-document .document-content th { background: #f1f5f9; color: #0f2a22; font-weight: 750; }
+.lesson-document .document-content tbody tr:nth-child(even) { background: #f8fafc; }
+.lesson-document .document-content img, .lesson-document .document-content svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  max-height: 75vh;
+  object-fit: contain;
+}
+.lesson-document .document-content figure img { margin: 0 auto; }
+.lesson-document .document-content figcaption { color: #64748b; font-size: .875rem; text-align: center; }
+.lesson-document .document-content hr { margin: 2rem 0; border-top: 1px solid #cbd5e1; }
+.lesson-document .document-download {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  gap: .45rem;
+  border: 1px solid #cbd5e1;
+  border-radius: .7rem;
+  background: white;
+  padding: .5rem .85rem;
+  color: #065f46;
+  font-size: .875rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+.lesson-document .document-download:hover { background: #f0fdf4; }
+.lesson-document :is(.pdf-toolbar, .ppt-toolbar, .ppt-navigation) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .65rem;
+}
+.lesson-document :is(.pdf-reader, .ppt-reader) { min-width: 0; }
+.lesson-document :is(.pdf-toolbar, .ppt-toolbar) {
+  justify-content: space-between;
+  border: 1px solid #e2e8f0;
+  border-radius: .85rem;
+  background: #f8fafc;
+  padding: .75rem;
+  margin-bottom: 1rem;
+}
+.lesson-document :is(.pdf-actions, .ppt-actions) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+}
+.lesson-document :is(.pdf-actions, .ppt-actions, .ppt-navigation, .ppt-overview) button {
+  min-height: 2.4rem;
+  border: 1px solid #cbd5e1;
+  border-radius: .6rem;
+  background: #fff;
+  padding: .35rem .75rem;
+  color: #164238;
+  font-size: .875rem;
+  font-weight: 650;
+}
+.lesson-document :is(.pdf-actions, .ppt-actions, .ppt-navigation, .ppt-overview) button:hover:not(:disabled) { background: #f0fdf4; }
+.lesson-document :is(.pdf-actions, .ppt-actions, .ppt-navigation, .ppt-overview) button:disabled { cursor: not-allowed; opacity: .45; }
+.lesson-document .document-download-control button { color: #065f46; }
+.lesson-document .pdf-reader > .pdf-page {
+  display: flex;
+  max-width: 100%;
+  justify-content: flex-start;
+  overflow-x: auto;
+  border-radius: .75rem;
+  background: #e2e8f0;
+  padding: 1rem;
+}
+.lesson-document .pdf-reader > .pdf-page .react-pdf__Page { flex: 0 0 auto; margin-inline: auto; }
+.lesson-document .pdf-reader > .pdf-page canvas { box-shadow: 0 2px 16px rgb(15 23 42 / 12%); }
+.lesson-document .pdf-text {
+  min-width: 0;
+  margin-top: 1rem;
+  border: 1px solid #d6e5da;
+  border-radius: .8rem;
+  background: #f5fbf6;
+  padding: 1rem 1.25rem;
+}
+.lesson-document .pdf-text h3 { margin: 0 0 .65rem; color: #0a1f1a; font-size: 1rem; font-weight: 750; }
+.lesson-document .pdf-text .document-content { line-height: 1.8; }
+.lesson-document .pdf-text .document-content .pdf-page p { white-space: pre-line; }
+.lesson-document .ppt-stage {
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: .75rem;
+  background: #f8fafc;
+}
+.lesson-document .ppt-transcript {
+  margin-top: 1rem;
+  border: 1px solid #d6e5da;
+  border-radius: .8rem;
+  background: #f5fbf6;
+  padding: 1rem 1.25rem;
+  color: #28463e;
+  font-size: .94rem;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+.lesson-document .ppt-transcript p { margin: .45rem 0; }
+.lesson-document .ppt-transcript :first-child { margin-top: 0; }
+.lesson-document .ppt-transcript :last-child { margin-bottom: 0; }
+.lesson-document .ppt-overview {
+  display: grid;
+  max-height: 70vh;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr));
+  gap: .75rem;
+  overflow-y: auto;
+  padding: .5rem;
+}
+.lesson-document .ppt-table-cell { border: 1px solid #cbd5e1; overflow: hidden; }
+.lesson-document :is(button, a):focus-visible { outline: 2px solid #047857; outline-offset: 3px; }
+@media (max-width: 640px) {
+  .lesson-document .document-content { font-size: .95rem; }
+  .lesson-document .document-content :is(th, td) { min-width: 4.5rem; padding: .45rem .6rem; }
+}
 

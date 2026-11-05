@@ -60,7 +60,7 @@ describe('mutation/request scope regressions', () => {
   it('short password remains valid for seven-character legacy credentials', async () => {
     mockFetch(({ path }) => path === '/auth/login' ? json({ token: 'B', user: other }) : undefined)
     renderPage(<AuthModal open onClose={() => {}} />)
-    fireEvent.change(screen.getByLabelText('账号'), { target: { value: 'legacy' } }); fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'Old1234' } })
+    fireEvent.change(screen.getByLabelText(/账号/), { target: { value: 'legacy' } }); fireEvent.change(screen.getByLabelText('密码'), { target: { value: 'Old1234' } })
     expect((screen.getByLabelText('密码') as HTMLInputElement).checkValidity()).toBe(true)
     fireEvent.click(screen.getByRole('button', { name: '登录' })); await waitFor(() => expect(toast.success).toHaveBeenCalled())
   })

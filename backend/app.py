@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 from functools import wraps
+from pathlib import Path
+
 from flask import Flask, Blueprint, current_app, jsonify, request, send_file, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import create_access_token, jwt_required
@@ -33,7 +35,8 @@ from security import (APIError, current_user, optional_user, optional_user_id, a
                       positive_id, rate_hits, rate_hit, client_ip, account_rate_key, lock_existing_child)
 from access import is_manager, is_visible, can_learn, can_download
 import money_service as money
-from document_converter import detect_content_type, convert_document, save_raw_file, is_allowed_extension
+from document_converter import (detect_content_type, convert_document, render_ppt_preview,
+                                save_raw_file, is_allowed_extension)
 from file_service import (UploadContext, directory, init_storage, safe_stored_name, source_asset,
                           lock_assets, bind_reference, unbind_toolkit, referenced_asset_ids,
                           reclaim_asset, recover_file_operations)
@@ -103,10 +106,12 @@ def create_app(config_override=None):
     @app.after_request
     def harden_responses(response):
         response.headers["X-Content-Type-Options"] = "nosniff"
-        protected = request.path.startswith((LESSON_ASSET_PATH, "/api/auth/", "/api/wallet", "/api/me/", "/api/orders", "/api/admin/"))
+        protected = request.path.startswith((LESSON_ASSET_PATH, "/api/lesson-raw/", "/api/lesson-preview/",
+                                              "/api/auth/", "/api/wallet", "/api/me/", "/api/orders", "/api/admin/"))
         authenticated = bool(request.headers.get("Authorization"))
         if protected or authenticated or response.status_code >= 400:
-            response.headers["Cache-Control"] = "no-store"
+            response.headers["Cache-Control"] = ("private, no-store" if request.path.startswith("/api/lesson-preview/")
+                                                 else "no-store")
             response.headers["Pragma"] = "no-cache"
         if request.path.startswith((ASSET_PATH, LESSON_ASSET_PATH)):
             response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
@@ -204,8 +209,17 @@ def parse_lessons_json(raw):
             if type(preview) is not bool:
                 raise ValueError("试看须为 true/false")
             lesson_id = positive_id(lesson["id"], "步骤ID") if "id" in lesson else None
-            cleaned.append({"id": lesson_id, "title": title, "content": content, "image_url": image,
-                            "image_file": None, "duration": duration, "preview": preview})
+            declared_type = lesson.get("contentType", lesson.get("content_type"))
+            if ("contentType" in lesson and "content_type" in lesson
+                    and lesson["contentType"] != lesson["content_type"]):
+                raise ValueError("步骤文档类型冲突")
+            if declared_type is not None and (not isinstance(declared_type, str) or
+                                              declared_type not in {"markdown", "word", "pdf", "html", "richtext", "ppt"}):
+                raise ValueError("步骤文档类型无效")
+            cleaned.append({"id": lesson_id, "title": title, "content": content,
+                            "_content_omitted": "content" not in lesson, "image_url": image,
+                            "image_file": None, "duration": duration, "preview": preview,
+                            "content_type": declared_type})
         return None, cleaned
     except (ValueError, TypeError) as error:
         return str(error), None
@@ -234,6 +248,23 @@ def _prepare_item_assets(item, uploads):
     return cover, [x for x in resources if x], images
 
 
+def _reclaim_lesson_raw(lesson_id, filename):
+    """Remove an unreferenced private original only after checking the committed DB."""
+    if not filename:
+        return
+    base = (Path(current_app.config["UPLOAD_FOLDER"]) / "lesson_raw").resolve(strict=True)
+    path = Path(filename)
+    if (not path.is_absolute() or not path.name.startswith(f"lesson_{lesson_id}_") or
+            not detect_content_type(path.name) or path.is_symlink() or
+            path.parent.resolve() != base or path.resolve().parent != base):
+        current_app.logger.warning("Skipped unsafe lesson original cleanup for lesson %s", lesson_id)
+        return
+    with Session(db.engine) as check:
+        referenced = check.execute(select(Lesson.id).where(Lesson.raw_file_path == str(path)).limit(1)).first()
+    if not referenced:
+        path.unlink(missing_ok=True)
+
+
 def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False, publish=True):
     """Single/batch shared import with a fresh transaction per item."""
     if skip_existing:
@@ -250,6 +281,8 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False,
     allocated = {x["id"] for x in [cover, *resources, *images] if x}
     created_id = None
     stale_ids = []
+    created_raw = []
+    retired_raw = []
     try:
         with Session(db.engine, expire_on_commit=False) as session, session.begin():
             retained_resources = []
@@ -334,6 +367,8 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False,
             if toolkit_id:
                 unbind_toolkit(session, toolkit.id, {asset_id: assets[asset_id] for asset_id in set(stale_ids)})
                 removed_ids = set(old_by_id) - kept_ids
+                retired_raw.extend((lesson_id, old_by_id[lesson_id].raw_file_path) for lesson_id in removed_ids
+                                    if old_by_id[lesson_id].raw_file_path)
                 if removed_ids:
                     session.execute(delete(LessonProgress).where(LessonProgress.lesson_id.in_(removed_ids)))
                     session.execute(delete(Lesson).where(Lesson.id.in_(removed_ids)))
@@ -361,21 +396,29 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False,
                 if asset_id:
                     url = "file:" + assets[asset_id].stored_name
                 lesson = previous or Lesson(toolkit_id=toolkit.id)
-                lesson.title, lesson.content, lesson.image = data["title"], data["content"], url
+                body = (previous.content if previous and "_partial_fields" in item and data.get("_content_omitted")
+                        else data["content"])
+                lesson.title, lesson.content, lesson.image = data["title"], body, url
                 lesson.duration, lesson.sort_order, lesson.is_preview = data["duration"], index, data["preview"]
 
                 # Handle document file upload and conversion
                 lesson_file = data.get("_file")
+                declared_type = data.get("content_type")
                 if lesson_file and hasattr(lesson_file, "filename") and lesson_file.filename:
                     content_type = detect_content_type(lesson_file.filename)
                     if not content_type:
                         raise APIError("不支持的文档格式")
+                    if declared_type is not None and declared_type != content_type:
+                        raise APIError("步骤文档类型与上传文件不一致")
                     lesson.content_type = content_type
                     # Save after flush to get lesson.id
-                elif "content_type" in data and data["content_type"]:
-                    lesson.content_type = data["content_type"]
                 else:
-                    lesson.content_type = "markdown"
+                    # Editing lesson metadata (or the toolkit alone) never
+                    # relabels a stored document or loses its HTML fallback.
+                    existing_type = previous.content_type if previous else "markdown"
+                    if declared_type is not None and declared_type != existing_type:
+                        raise APIError("步骤文档类型不可修改，请上传对应格式的文件")
+                    lesson.content_type = existing_type
 
                 session.add(lesson)
                 session.flush()
@@ -384,14 +427,21 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False,
                 if lesson_file and hasattr(lesson_file, "filename") and lesson_file.filename:
                     upload_folder = current_app.config["UPLOAD_FOLDER"]
                     raw_path = save_raw_file(lesson_file, upload_folder, lesson.id)
+                    created_raw.append((lesson.id, raw_path))
+                    if previous and previous.raw_file_path:
+                        retired_raw.append((lesson.id, previous.raw_file_path))
                     lesson.raw_file_path = raw_path
                     try:
-                        converted_html = convert_document(raw_path, lesson.content_type)
-                        lesson.converted_html = converted_html
-                        lesson.content = f"[Document: {lesson_file.filename}]"  # Placeholder
-                    except Exception as e:
-                        current_app.logger.error(f"Document conversion failed: {e}")
-                        lesson.converted_html = f"<p>文档转换失败：{str(e)}</p>"
+                        lesson.converted_html = convert_document(raw_path, lesson.content_type)
+                        if lesson.content_type == "markdown":
+                            with open(raw_path, encoding="utf-8") as source:
+                                lesson.content = source.read()
+                        else:
+                            lesson.content = f"[Document: {lesson_file.filename}]"
+                    except Exception:
+                        current_app.logger.exception("Document conversion failed")
+                        os.unlink(raw_path)
+                        raise APIError("文档解析失败，请检查文件格式与内容")
 
                 if asset_id:
                     bind_reference(session, assets[asset_id], identity, toolkit.id, "lesson", lesson.id, preserve=preserved_image)
@@ -417,8 +467,18 @@ def _persist_item(item, identity, uploads, toolkit_id=None, skip_existing=False,
             toolkit = db.session.get(Toolkit, created_id)
             result = toolkit.serialize(identity.uid, detail=True)
         else:
+            for lesson_id, raw_path in created_raw:
+                try:
+                    _reclaim_lesson_raw(lesson_id, raw_path)
+                except (OSError, SQLAlchemyError):
+                    current_app.logger.warning("Deferred uncommitted lesson original cleanup for lesson %s", lesson_id)
             uploads.resolve_failure(allocated)
             raise
+    for lesson_id, raw_path in retired_raw:
+        try:
+            _reclaim_lesson_raw(lesson_id, raw_path)
+        except (OSError, SQLAlchemyError):
+            current_app.logger.warning("Deferred old lesson original cleanup for lesson %s", lesson_id)
     for asset_id in sorted(set(stale_ids)):
         try:
             reclaim_asset(asset_id)
@@ -440,16 +500,19 @@ def public_stats():
 @api.post("/api/auth/login")
 def login():
     data = json_object()
-    username = text(data.get("username", ""), "账号", 50, 1)
+    account_input = text(data.get("username", "") or data.get("email", ""), "账号", 120, 1)
     password = text(data.get("password", ""), "密码", 128, 1, strip=False)
     ip = client_ip()
     try:
-        account = account_rate_key(username)
+        account = account_rate_key(account_input)
     except SQLAlchemyError:
         raise APIError("认证服务暂不可用", 503)
     rate_hits([(f"login:ip:{ip}", 30, 60), (f"login:account:{account}", 8, 60),
                (f"login:ip:{ip}", 100, 600), (f"login:account:{account}", 30, 600)])
-    user = User.query.filter_by(username=username).first()
+    # Try to find user by username first, then by email
+    user = User.query.filter_by(username=account_input).first()
+    if not user:
+        user = User.query.filter_by(email=account_input).first()
     if not user or not check_password_hash(user.password_hash, password):
         raise APIError("账号或密码不正确", 401)
     return jsonify({"token": _token(user), "user": user.public()})
@@ -459,17 +522,23 @@ def login():
 def register():
     data = json_object()
     username = text(data.get("username", ""), "账号", 50, 3)
+    email = text(data.get("email", ""), "邮箱", 120, 0)
     password = text(data.get("password", ""), "密码", 128, 8, strip=False)
-    nickname = text(data.get("nickname", username), "昵称", 80, 1)
     if not re.fullmatch(r"[\w.\-·]+", username):
         raise APIError("账号需为 3～50 位字母、数字或 _.- 字符")
+    if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise APIError("邮箱格式不正确")
     ip = client_ip()
     rate_hits([(f"register:{ip}", 5, 60), (f"register:{ip}", 20, 600)])
     try:
         with Session(db.engine, expire_on_commit=False) as session, session.begin():
             if session.execute(select(User.id).where(User.username == username)).first():
                 raise APIError("账号已存在", 409)
-            user = User(username=username, nickname=nickname, password_hash=generate_password_hash(password), role="user")
+            if email and session.execute(select(User.id).where(User.email == email)).first():
+                raise APIError("邮箱已被注册", 409)
+            # Use username as nickname
+            user = User(username=username, email=email or None, nickname=username,
+                       password_hash=generate_password_hash(password), role="user")
             session.add(user)
             session.flush()
             result, token = user.public(), _token(user)
@@ -661,6 +730,7 @@ def update_status(toolkit_id):
 def delete_toolkit(toolkit_id):
     identity = request_identity()
     asset_ids = []
+    retired_raw = []
     with Session(db.engine) as session, session.begin():
         toolkit, orders, user = _manage_locked(session, toolkit_id, identity)
         purchase = session.execute(select(Purchase.id).where(Purchase.toolkit_id == toolkit_id).with_for_update()).first()
@@ -671,13 +741,21 @@ def delete_toolkit(toolkit_id):
             asset_ids = referenced_asset_ids(session, toolkit_id)
             assets = lock_assets(session, asset_ids)
             unbind_toolkit(session, toolkit_id, assets)
-            lesson_ids = list(session.execute(select(Lesson.id).where(Lesson.toolkit_id == toolkit_id)).scalars())
+            lessons = session.execute(select(Lesson.id, Lesson.raw_file_path).where(
+                Lesson.toolkit_id == toolkit_id)).all()
+            lesson_ids = [lesson_id for lesson_id, _ in lessons]
+            retired_raw = [(lesson_id, raw_path) for lesson_id, raw_path in lessons if raw_path]
             if lesson_ids:
                 session.execute(delete(LessonProgress).where(LessonProgress.lesson_id.in_(lesson_ids)))
             session.execute(delete(Favorite).where(Favorite.toolkit_id == toolkit_id))
             session.execute(delete(Lesson).where(Lesson.toolkit_id == toolkit_id))
             session.delete(toolkit)
             result = {"message": "工具包已删除", "mode": "deleted"}
+    for lesson_id, raw_path in retired_raw:
+        try:
+            _reclaim_lesson_raw(lesson_id, raw_path)
+        except (OSError, SQLAlchemyError):
+            current_app.logger.warning("Deferred deleted lesson original cleanup for lesson %s", lesson_id)
     for asset_id in sorted(set(asset_ids)):
         try:
             reclaim_asset(asset_id)
@@ -1139,11 +1217,9 @@ if __name__ == "__main__":
         raise RuntimeError("The built-in server is development-only; use WSGI in production")
     application.run(host="127.0.0.1", port=6000, debug=application.config["DEBUG"])
 
-@api.get("/api/lesson-raw/<int:lesson_id>")
-@jwt_required()
-def download_lesson_raw(lesson_id):
-    """Download original document file for a lesson."""
-    user = current_user()
+def _accessible_lesson_raw(lesson_id):
+    """Apply the raw-file policy and confine the stored path to this lesson."""
+    user = optional_user()
     lesson = db.session.get(Lesson, lesson_id)
     if not lesson or not lesson.raw_file_path:
         raise APIError("原始文件不存在", 404)
@@ -1151,9 +1227,37 @@ def download_lesson_raw(lesson_id):
     purchased = _purchased(db.session, user, toolkit.id)
     if not is_visible(toolkit, user, purchased) or not can_learn(toolkit, user, purchased, lesson):
         raise APIError("无权访问", 403)
-    if not os.path.exists(lesson.raw_file_path):
-        raise APIError("原始文件已丢失", 404)
-    return send_file(lesson.raw_file_path, as_attachment=True)
+    base = (Path(current_app.config["UPLOAD_FOLDER"]) / "lesson_raw").resolve()
+    path = Path(lesson.raw_file_path)
+    if (path.name.startswith(f"lesson_{lesson.id}_") and
+            detect_content_type(path.name) and
+            not path.is_symlink() and path.parent.resolve() == base and
+            path.is_file() and path.resolve().parent == base):
+        return lesson, path
+    raise APIError("原始文件已丢失", 404)
+
+
+@api.get("/api/lesson-raw/<int:lesson_id>")
+@jwt_required(optional=True)
+def download_lesson_raw(lesson_id):
+    """Download original document file for an accessible lesson."""
+    _, path = _accessible_lesson_raw(lesson_id)
+    return send_file(path, as_attachment=True)
+
+
+@api.get("/api/lesson-preview/<int:lesson_id>")
+@jwt_required(optional=True)
+def lesson_preview(lesson_id):
+    """Data-only PPTX layout, under exactly the original-file permissions."""
+    lesson, path = _accessible_lesson_raw(lesson_id)
+    if lesson.content_type != "ppt" or not is_allowed_extension(path.name, "ppt"):
+        raise APIError("此文档不支持演示文稿预览", 404)
+    rate_hits([(f"ppt-preview:{client_ip()}", 30, 60),
+               (f"ppt-preview:{client_ip()}", 120, 600)])
+    try:
+        return jsonify(render_ppt_preview(path))
+    except (ValueError, zipfile.BadZipFile):
+        raise APIError("演示文稿无法预览，请查看文档内容", 422) from None
 
 
 

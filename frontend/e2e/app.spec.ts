@@ -36,6 +36,26 @@ async function getJSON(request: APIRequestContext, path: string, headers: Record
   expect(response.ok()).toBeTruthy(); return response.json()
 }
 
+test('avatar dropdown stays open as the pointer enters and exposes account navigation', async ({ page, qa }) => {
+  await loginUI(page, qa.users.buyer)
+  const avatar = page.getByRole('link', { name: '个人中心', exact: true })
+  await avatar.hover()
+
+  const accountNav = page.getByRole('navigation', { name: '个人中心快捷导航', exact: true })
+  await expect(accountNav).toBeVisible()
+  await expect(accountNav.getByRole('link', { name: '钱包', exact: true })).toHaveAttribute('href', '/me/wallet')
+  await expect(accountNav.getByRole('link', { name: '我的收藏', exact: true })).toHaveAttribute('href', '/me/favorites')
+  await expect(accountNav.getByRole('link', { name: '我的工具包', exact: true })).toHaveAttribute('href', '/me/toolkits')
+  const ordersLink = accountNav.getByRole('link', { name: '订单', exact: true })
+  await expect(ordersLink).toHaveAttribute('href', '/me/orders')
+
+  const walletLink = accountNav.getByRole('link', { name: '钱包', exact: true })
+  await walletLink.hover()
+  await expect(accountNav).toBeVisible()
+  await walletLink.click()
+  await expect(page).toHaveURL(/\/me\/wallet$/)
+})
+
 test('anonymous free course and paid preview are real learning entry points without creating orders', async ({ page, qa }) => {
   const createdOrders: string[] = []
   page.on('request', request => { if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/orders') createdOrders.push(request.url()) })

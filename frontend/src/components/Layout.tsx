@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Home, LibraryBig, UserRound, LogOut, WalletCards, ShieldCheck, Plus } from 'lucide-react'
+import { Home, LibraryBig, UserRound, LogOut, WalletCards, ShieldCheck, Plus, Heart, ShoppingBag } from 'lucide-react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../AuthContext'
 import { cn, money } from '../lib'
@@ -7,6 +7,12 @@ import { AuthModal } from './AuthModal'
 import { Logo } from './Logo'
 
 const nav = [{ to: '/', label: '首页', icon: Home }, { to: '/toolkits', label: '工具包', icon: LibraryBig }, { to: '/me', label: '我的', icon: UserRound }]
+const accountNav = [
+  { to: '/me/wallet', label: '钱包', icon: WalletCards },
+  { to: '/me/favorites', label: '我的收藏', icon: Heart },
+  { to: '/me/toolkits', label: '我的工具包', icon: LibraryBig },
+  { to: '/me/orders', label: '订单', icon: ShoppingBag },
+]
 
 export function Layout() {
   const { user, logout, loading, restoreError, refresh } = useAuth()
@@ -24,11 +30,14 @@ export function Layout() {
             <Link to="/publish" className="btn-ghost hidden sm:flex"><Plus size={16} />发布工具包</Link>
             <button onClick={() => navigate('/me/wallet')} className="hidden rounded-xl bg-white px-3 py-2 text-sm font-bold text-ink shadow-sm lg:block"><WalletCards size={16} className="mr-1.5 inline text-emerald-600" />{money(user.balance)}</button>
             <div className="group relative">
-              <Link to="/me" className="grid size-10 place-items-center rounded-full bg-pine text-sm font-black text-mint ring-2 ring-white">{user.nickname.slice(0, 1)}</Link>
-              <div className="invisible absolute right-0 top-12 w-52 translate-y-2 rounded-2xl border bg-white p-2 opacity-0 shadow-xl transition group-hover:visible group-hover:translate-y-0 group-hover:opacity-100">
+              <Link to="/me" aria-label="个人中心" className="grid size-10 place-items-center rounded-full bg-pine text-sm font-black text-mint ring-2 ring-white">{user.nickname.slice(0, 1)}</Link>
+              <div className="invisible absolute right-0 top-10 w-52 translate-y-2 rounded-2xl border bg-white p-2 opacity-0 shadow-xl transition group-hover:visible group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:visible group-focus-within:translate-y-0 group-focus-within:opacity-100">
                 <div className="border-b p-3"><p className="font-bold">{user.nickname}</p><p className="mt-1 text-xs text-slate-400">{user.role === 'admin' ? '超级管理员' : `余额 ${money(user.balance)}`}</p></div>
+                <nav aria-label="个人中心快捷导航" className="border-b py-1">
+                  {accountNav.map(({ to, label, icon: Icon }) => <Link key={to} to={to} className="flex items-center gap-2 rounded-xl p-2.5 text-sm text-slate-600 hover:bg-slate-50 hover:text-ink"><Icon size={16} />{label}</Link>)}
+                </nav>
                 {user.role === 'admin' && <Link to="/admin" className="mt-1 flex items-center gap-2 rounded-xl p-2.5 text-sm hover:bg-slate-50"><ShieldCheck size={16} />管理中心</Link>}
-                <button onClick={() => { logout(); navigate('/') }} className="flex w-full items-center gap-2 rounded-xl p-2.5 text-sm text-red-500 hover:bg-red-50"><LogOut size={16} />退出登录</button>
+                <button onClick={() => { logout(); navigate('/') }} className="mt-1 flex w-full items-center gap-2 rounded-xl border-t p-2.5 pt-3 text-sm text-red-500 hover:bg-red-50"><LogOut size={16} />退出登录</button>
               </div>
             </div>
           </> : !loading && <button onClick={() => setAuthOpen(true)} className="btn-primary px-4 sm:px-5"><span className="sm:hidden">登录</span><span className="hidden sm:inline">登录 / 注册</span></button>}

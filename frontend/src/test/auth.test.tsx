@@ -108,16 +108,16 @@ describe('authentication and scoped transport', () => {
     await screen.findByText('Buyer')
     const ui = userEvent.setup()
     if (mode === 'register') {
-      await ui.click(screen.getByRole('button', { name: '还没有账号？立即注册' }))
-      await ui.type(screen.getByLabelText('昵称'), 'New user')
+      await ui.click(screen.getByRole('button', { name: '没有账号？立即注册' }))
+      await ui.type(screen.getByLabelText(/邮箱/), 'new@example.com')
     }
-    await ui.type(screen.getByLabelText('账号'), 'new-user')
+    await ui.type(screen.getByLabelText(mode === 'login' ? /账号/ : /用户名/), 'new-user')
     await ui.type(screen.getByLabelText('密码'), 'New12345')
     await ui.click(screen.getByRole('button', { name: mode === 'login' ? '登录' : '注册并进入' }))
     const sent = calls.find(call => call.path === `/auth/${mode}`)!
     expect(sent).toBeDefined()
     if (cancel === 'close') await ui.click(screen.getByRole('button', { name: '关闭对话框' }))
-    else if (cancel === 'mode') await ui.click(screen.getByRole('button', { name: mode === 'login' ? '还没有账号？立即注册' : '已有账号？返回登录' }))
+    else if (cancel === 'mode') await ui.click(screen.getByRole('button', { name: mode === 'login' ? '没有账号？立即注册' : '已有账号？返回登录' }))
     else await result.navigate('/another')
     expect(sent.options.signal?.aborted).toBe(true)
     await settle(() => pending.resolve(json({ token: 'Late rejected session', user: other })))
@@ -146,7 +146,7 @@ describe('authentication and scoped transport', () => {
     renderPage(<AuthModal open onClose={close} />)
     const dialog = screen.getByRole('dialog', { name: '登录知核' }); expect(dialog).toHaveAttribute('aria-modal', 'true')
     const ui = userEvent.setup()
-    await ui.type(screen.getByLabelText('账号'), 'legacy'); await ui.type(screen.getByLabelText('密码'), 'Old123')
+    await ui.type(screen.getByLabelText(/账号/), 'legacy'); await ui.type(screen.getByLabelText('密码'), 'Old123')
     expect((screen.getByLabelText('密码') as HTMLInputElement).checkValidity()).toBe(true)
     await ui.click(screen.getByRole('button', { name: '登录' }))
     await waitFor(() => expect(close).toHaveBeenCalledOnce())
@@ -154,10 +154,10 @@ describe('authentication and scoped transport', () => {
   })
   it('registration requires eight characters without imposing that limit on login', async () => {
     mockFetch(() => undefined); renderPage(<AuthModal open onClose={() => {}} />)
-    await userEvent.click(screen.getByRole('button', { name: '还没有账号？立即注册' }))
+    await userEvent.click(screen.getByRole('button', { name: '没有账号？立即注册' }))
     const password = screen.getByLabelText('密码') as HTMLInputElement
     expect(password.minLength).toBe(8)
-    await userEvent.type(screen.getByLabelText('昵称'), 'Name'); await userEvent.type(screen.getByLabelText('账号'), 'account'); await userEvent.type(password, 'Old123')
+    await userEvent.type(screen.getByLabelText(/邮箱/), 'name@example.com'); await userEvent.type(screen.getByLabelText(/用户名/), 'account'); await userEvent.type(password, 'Old123')
     await userEvent.click(screen.getByRole('button', { name: '注册并进入' }))
     expect(fetch).not.toHaveBeenCalled()
   })

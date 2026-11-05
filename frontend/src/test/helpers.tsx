@@ -34,7 +34,7 @@ export function mockFetch(handler: (call: FetchCall) => Response | Promise<Respo
 }
 export function AuthControls() {
   const auth = useAuth()
-  return <div><p data-testid="identity">{auth.user?.nickname ?? 'Anonymous'}</p><p data-testid="auth-loading">{String(auth.loading)}</p>{auth.restoreError && <p role="alert">{auth.restoreError}</p>}<button onClick={() => void auth.login('other', 'secret').catch(() => {})}>Switch session</button><button onClick={() => void auth.register('new-account', 'new-password', 'New').catch(() => {})}>Register session</button><button onClick={auth.logout}>Logout session</button><button onClick={() => void auth.refresh().catch(() => {})}>Refresh session</button></div>
+  return <div><p data-testid="identity">{auth.user?.nickname ?? 'Anonymous'}</p><p data-testid="auth-loading">{String(auth.loading)}</p>{auth.restoreError && <p role="alert">{auth.restoreError}</p>}<button onClick={() => void auth.login('other', 'secret').catch(() => {})}>Switch session</button><button onClick={() => void auth.register('new-account', 'new-password', 'new@example.com').catch(() => {})}>Register session</button><button onClick={auth.logout}>Logout session</button><button onClick={() => void auth.refresh().catch(() => {})}>Refresh session</button></div>
 }
 export function renderRoutes(routes: RouteObject[], initial = '/', state?: unknown, controls = false) {
   const openAuth = vi.fn()
