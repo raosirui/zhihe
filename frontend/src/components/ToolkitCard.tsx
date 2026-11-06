@@ -1,7 +1,7 @@
 import { Bookmark, Download, LockKeyhole, Star } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { Toolkit } from '../types'
-import { money } from '../lib'
+import { money } from '../shared/lib'
 
 export function ToolkitCard({ item }: { item: Toolkit }) {
   return <Link to={`/toolkits/${item.id}`} className="group overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-soft">

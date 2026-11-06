@@ -1,6 +1,6 @@
 import { Dna } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { cn } from '../lib'
+import { cn } from '../shared/lib'
 
 export function Logo({ light = false, compact = false }: { light?: boolean; compact?: boolean }) {
   return <Link to="/" className="flex items-center gap-2.5">

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ImgHTMLAttributes } from 'react'
 import { useAuth } from '../AuthContext'
-import { getSessionGeneration, getToken, sessionMatches, setToken } from '../lib'
+import { getSessionGeneration, getToken, sessionMatches, setToken } from '../shared/api'
 import { useRequestScope } from '../useRequestScope'
 
 export function ProtectedImage({ src, alt = '', ...props }: ImgHTMLAttributes<HTMLImageElement>) {

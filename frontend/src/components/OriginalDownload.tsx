@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { downloadAuthed, getSessionGeneration, getToken, isAbort, sessionMatches } from '../lib'
+import { downloadAuthed, getSessionGeneration, getToken, isAbort, sessionMatches } from '../shared/api'
 import { lessonRawPath } from './protectedDocumentFetch'
 
 const extensions: Record<string, string> = {

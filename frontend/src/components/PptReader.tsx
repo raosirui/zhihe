@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { getSessionGeneration, getToken, sessionMatches } from '../lib'
+import { getSessionGeneration, getToken, sessionMatches } from '../shared/api'
 import { OriginalDownload } from './OriginalDownload'
 import { fetchLessonPreview, lessonPreviewPath } from './protectedDocumentFetch'
 

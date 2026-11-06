@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Document, Page, pdfjs } from 'react-pdf'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import 'react-pdf/dist/Page/TextLayer.css'
-import { getSessionGeneration, getToken, sessionMatches } from '../lib'
+import { getSessionGeneration, getToken, sessionMatches } from '../shared/api'
 import { OriginalDownload } from './OriginalDownload'
 import { fetchLessonBlob, lessonRawPath } from './protectedDocumentFetch'
 

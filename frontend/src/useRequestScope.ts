@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useAuth } from './AuthContext'
-import { api, getSessionGeneration, getToken, sessionMatches } from './lib'
+import { api, getSessionGeneration, getToken, sessionMatches } from './shared/api'
 
 export type ScopedRequest = { signal: AbortSignal; current: () => boolean }
 

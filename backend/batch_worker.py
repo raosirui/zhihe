@@ -23,6 +23,7 @@ from extensions import db
 from models import BatchJob, Toolkit, User, utcnow
 from security import APIError, Identity, assert_identity
 from file_service import init_storage
+from services.toolkit import persist_item
 import money_service as money
 
 
@@ -112,8 +113,6 @@ def load_and_process(app, job_id):
     """Process one claimed job to a terminal state. Inside an app context."""
     from batch_kit import load_batch_package, ManifestError
     from file_service import UploadContext
-    import app as app_module  # late import: avoids a module cycle at definition time
-
     with Session(db.engine) as session:
         job = session.get(BatchJob, job_id)
         if not job:
@@ -184,9 +183,8 @@ def _import_item(item, identity, uploads, mode, publish):
     """Batch create/update semantics. skip reuses _persist_item's duplicate
     check under the owner lock; update resolves this author's same-title
     toolkit and imports over it; create never deduplicates."""
-    import app as app_module
     if mode == "skip":
-        result = app_module._persist_item(item, identity, uploads, skip_existing=True, publish=publish)
+        result = persist_item(item, identity, uploads, skip_existing=True, publish=publish)
         if result.get("status") == "skipped":
             return {"status": "skipped", "toolkitId": result["toolkitId"]}
         return {"status": "created", "toolkitId": result["id"]}
@@ -196,9 +194,9 @@ def _import_item(item, identity, uploads, mode, publish):
                 Toolkit.author_id == identity.uid, Toolkit.title == item["title"])
                 .order_by(Toolkit.id).limit(1)).scalar_one_or_none()
         if existing_id is not None:
-            app_module._persist_item(item, identity, uploads, toolkit_id=existing_id, publish=publish)
+            persist_item(item, identity, uploads, toolkit_id=existing_id, publish=publish)
             return {"status": "updated", "toolkitId": existing_id}
-    result = app_module._persist_item(item, identity, uploads, publish=publish)
+    result = persist_item(item, identity, uploads, publish=publish)
     return {"status": "created", "toolkitId": result["id"]}
 
 

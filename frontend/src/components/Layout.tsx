@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { Home, LibraryBig, UserRound, LogOut, WalletCards, ShieldCheck, Plus, Heart, ShoppingBag } from 'lucide-react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { useAuth } from '../AuthContext'
-import { cn, money } from '../lib'
-import { AuthModal } from './AuthModal'
+import { useAuth } from '../app/AuthProvider'
+import { cn, money } from '../shared/lib'
+import { AuthModal } from '../features/auth/AuthModal'
 import { Logo } from './Logo'
 
 const nav = [{ to: '/', label: '首页', icon: Home }, { to: '/toolkits', label: '工具包', icon: LibraryBig }, { to: '/me', label: '我的', icon: UserRound }]

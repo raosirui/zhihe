@@ -1,4 +1,4 @@
-import { getSessionGeneration, getToken, sessionMatches, setToken, superseded } from '../lib'
+import { getSessionGeneration, getToken, sessionMatches, setToken, superseded } from '../shared/api'
 
 // Only the lesson's own download route can be used for authenticated document requests.
 // In particular, neither a caller-supplied URL nor its query string is forwarded to fetch.
