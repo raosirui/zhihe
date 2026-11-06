@@ -117,15 +117,36 @@ describe('single-toolkit publishing form', () => {
     expect(JSON.parse(String(data.get('lessons')))[0].preview).toBe(true)
   })
 
-  it('clears a required-field error as the author corrects it', async () => {
+  it('saves a draft with incomplete required fields and blank numeric values', async () => {
     setToken('publisher-session')
-    mockFetch(() => undefined)
+    const { calls } = mockFetch(({ path, options }) => path === '/toolkits' && options.method === 'POST' ? json({ id: 46 }) : undefined)
     renderPage(<PublishPage />)
     await screen.findByLabelText(/工具包名称/)
 
+    fireEvent.change(screen.getByLabelText(/定价（元）/), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText(/步骤标题/), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText(/预计学习时长/), { target: { value: '' } })
     fireEvent.click(screen.getByRole('button', { name: '保存草稿' }))
-    expect(screen.getByRole('alert')).toHaveTextContent('请填写工具包名称')
-    fireEvent.change(screen.getByLabelText(/工具包名称/), { target: { value: '已填写名称' } })
+
+    await waitFor(() => expect(calls.some(call => call.path === '/toolkits' && call.options.method === 'POST')).toBe(true))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    const data = calls.find(call => call.path === '/toolkits' && call.options.method === 'POST')!.options.body as FormData
+    expect(data.get('status')).toBe('draft')
+    expect(data.get('title')).toBe('')
+    expect(data.get('description')).toBe('')
+    expect(data.get('price')).toBe('')
+    expect(JSON.parse(String(data.get('lessons')))[0]).toMatchObject({ title: '', content: '', duration: 0 })
+  })
+
+  it('validates incomplete content when publishing instead of saving a draft', async () => {
+    setToken('publisher-session')
+    const { calls } = mockFetch(() => undefined)
+    const result = renderPage(<PublishPage />)
+    await screen.findByLabelText(/工具包名称/)
+
+    fireEvent.submit(result.container.querySelector('form')!)
+
+    expect(screen.getByRole('alert')).toHaveTextContent('请填写工具包名称')
+    expect(calls.some(call => call.path === '/toolkits' && call.options.method === 'POST')).toBe(false)
   })
 })

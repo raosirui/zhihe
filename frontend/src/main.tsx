@@ -6,4 +6,13 @@ import App from './App'
 import { AuthProvider } from './AuthContext'
 import './index.css'
 
-createRoot(document.getElementById('root')!).render(<StrictMode><BrowserRouter><AuthProvider><App /><Toaster position="top-center" richColors closeButton /></AuthProvider></BrowserRouter></StrictMode>)
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <BrowserRouter>
+      <AuthProvider>
+        <App />
+        <Toaster position="top-center" richColors closeButton />
+      </AuthProvider>
+    </BrowserRouter>
+  </StrictMode>,
+)

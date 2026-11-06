@@ -126,9 +126,44 @@ def test_batch_publish_zero_creates_drafts(env):
     assert client.get("/api/toolkits?q=draft+one").json["total"] == 1
 
 
+def test_incomplete_draft_can_be_saved_but_not_published(env):
+    _, client, _, headers, _ = env
+    created = client.post("/api/toolkits", json={
+        "title": "", "description": "", "price": "", "status": "draft",
+        "lessons": [{"title": "", "content": "", "duration": 0}],
+    }, headers=headers["seller"])
+    assert created.status_code == 201, created.json
+    tid = created.json["id"]
+    draft = client.get(f"/api/toolkits/{tid}", headers=headers["seller"]).json
+    assert draft["status"] == "draft" and draft["title"] == "" and draft["description"] == ""
+    assert draft["price"] == 0 and draft["lessons"][0]["title"] == ""
+    rejected = client.put(f"/api/toolkits/{tid}/status", json={"status": "published"}, headers=headers["seller"])
+    assert rejected.status_code == 400
+    assert client.get(f"/api/toolkits/{tid}", headers=headers["seller"]).json["status"] == "draft"
+
+    no_lessons = client.post("/api/toolkits", json={"title": "unfinished", "description": "d",
+                               "status": "published"}, headers=headers["seller"])
+    assert no_lessons.status_code == 400
+    empty_body = client.post("/api/toolkits", json={
+        "title": "unfinished", "description": "d", "status": "published",
+        "lessons": [{"title": "intro", "content": "", "duration": 10}],
+    }, headers=headers["seller"])
+    assert empty_body.status_code == 400
+    default_published = client.post("/api/toolkits", json={"title": "unfinished", "description": "d"},
+                                    headers=headers["seller"])
+    assert default_published.status_code == 400
+
+    unsafe = client.post("/api/toolkits", json={
+        "title": "", "description": "", "status": "draft",
+        "lessons": [{"title": "", "content": "", "duration": 601}],
+    }, headers=headers["seller"])
+    assert unsafe.status_code == 400
+
+
 def test_draft_status_matrix(env):
     app, client, _, headers, _ = env
-    created = client.post("/api/toolkits", json={"title": "draft flow", "description": "d", "status": "draft"},
+    created = client.post("/api/toolkits", json={"title": "draft flow", "description": "d", "status": "draft",
+                                                  "lessons": [{"title": "intro", "content": "body", "duration": 10}]},
                           headers=headers["seller"])
     assert created.status_code == 201 and created.json["status"] == "draft"
     tid = created.json["id"]

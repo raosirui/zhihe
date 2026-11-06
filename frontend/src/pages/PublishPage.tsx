@@ -59,20 +59,22 @@ export function PublishPage() {
   if (!user) return <div className="mx-auto max-w-xl px-4 py-20 text-center"><PackageOpen className="mx-auto text-slate-300" size={40} /><h1 className="mt-4 text-xl font-black">登录后即可发布工具包</h1><button onClick={openAuth} className="btn-primary mt-6">登录 / 注册</button></div>
 
   const validate = (status: PublishStatus) => {
-    if (!form.title.trim()) return '请填写工具包名称'
+    const publishing = status === 'published'
+    if (publishing && !form.title.trim()) return '请填写工具包名称'
     if (form.title.length > MAX_TITLE_LENGTH) return `工具包名称不能超过 ${MAX_TITLE_LENGTH} 字`
-    if (!form.description.trim()) return '请填写工具包介绍'
+    if (publishing && !form.description.trim()) return '请填写工具包介绍'
     if (form.description.length > MAX_DESCRIPTION_LENGTH) return `工具包介绍不能超过 ${MAX_DESCRIPTION_LENGTH} 字`
     if (form.tags.length > MAX_TAGS_LENGTH) return `标签不能超过 ${MAX_TAGS_LENGTH} 字`
-    if (!Number.isFinite(Number(form.price)) || Number(form.price) < 0 || Number(form.price) > 9999) return '定价须为 0–9999 元'
-    if (!/^\d+(\.\d{1,2})?$/.test(form.price)) return '定价最多保留两位小数'
+    if (publishing && !form.price.trim()) return '请填写工具包定价'
+    if (form.price.trim() && (!Number.isFinite(Number(form.price)) || Number(form.price) < 0 || Number(form.price) > 9999)) return '定价须为 0–9999 元'
+    if (form.price.trim() && !/^\d+(\.\d{1,2})?$/.test(form.price)) return '定价最多保留两位小数'
     if (lessons.length > MAX_LESSONS) return `教程步骤不能超过 ${MAX_LESSONS} 步`
     for (let i = 0; i < lessons.length; i++) {
       const lesson = lessons[i]
-      if (!lesson.title.trim()) return `请填写第 ${i + 1} 步的标题`
+      if (publishing && !lesson.title.trim()) return `请填写第 ${i + 1} 步的标题`
       if (lesson.title.length > MAX_LESSON_TITLE_LENGTH) return `第 ${i + 1} 步标题不能超过 ${MAX_LESSON_TITLE_LENGTH} 字`
-      if (!Number.isInteger(lesson.duration) || lesson.duration < 1 || lesson.duration > 600) return `第 ${i + 1} 步的预计学习时长须为 1–600 分钟的整数`
-      if (status === 'published' && !lessonFiles[i] && !lesson.content.trim()) return `请填写第 ${i + 1} 步正文，或上传教程原件`
+      if (!(status === 'draft' && lesson.duration === 0) && (!Number.isInteger(lesson.duration) || lesson.duration < 1 || lesson.duration > 600)) return `第 ${i + 1} 步的预计学习时长须为 1–600 分钟的整数`
+      if (publishing && !lessonFiles[i] && !lesson.content.trim()) return `请填写第 ${i + 1} 步正文，或上传教程原件`
     }
     return uploadError(lessonFiles, resources)
   }

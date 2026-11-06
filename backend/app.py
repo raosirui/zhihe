@@ -158,16 +158,19 @@ def _serialize_list(items, user):
     return [x.serialize(user.id if user else None, user=user, purchased_ids=bought, favorited_ids=favorites) for x in items]
 
 
-def toolkit_form_errors(form):
+def toolkit_form_errors(form, allow_incomplete=False):
     try:
-        title = string_field(form.get("title", ""), "标题", 120, True)
-        description = string_field(form.get("description", ""), "介绍", 20000, True)
+        title = string_field(form.get("title", ""), "标题", 120, not allow_incomplete)
+        description = string_field(form.get("description", ""), "介绍", 20000, not allow_incomplete)
         summary = string_field(form.get("summary", ""), "摘要", 500) or description[:120]
         category = string_field(form.get("category", "生信分析"), "分类", 50)
         level = string_field(form.get("level", "入门"), "难度", 20)
         if category not in CATEGORIES or level not in LEVELS:
             raise ValueError("分类或难度无效")
-        price = parse_money(form.get("price", 0), 0, 9999, "定价")
+        raw_price = form.get("price", 0)
+        if allow_incomplete and raw_price == "":
+            raw_price = 0
+        price = parse_money(raw_price, 0, 9999, "定价")
         tags = string_field(form.get("tags", ""), "标签", 300)
         cover = string_field(form.get("cover", ""), "封面", 500) or None
         return None, {"title": title, "description": description, "summary": summary,
@@ -176,7 +179,7 @@ def toolkit_form_errors(form):
         return str(error), None
 
 
-def parse_lessons_json(raw):
+def parse_lessons_json(raw, allow_incomplete=False):
     try:
         if raw is None or raw == "":
             lessons = []
@@ -193,7 +196,7 @@ def parse_lessons_json(raw):
         for index, lesson in enumerate(lessons):
             if not isinstance(lesson, dict):
                 raise ValueError(f"步骤 {index + 1} 格式不正确")
-            title = string_field(lesson.get("title", f"步骤 {index + 1}"), "步骤标题", 160, True)
+            title = string_field(lesson.get("title", f"步骤 {index + 1}"), "步骤标题", 160, not allow_incomplete)
             content = lesson.get("content", "")
             if not isinstance(content, str) or len(content.encode("utf-8")) > 1024 * 1024:
                 raise ValueError("步骤正文须为不超过 1MB 的字符串")
@@ -203,7 +206,8 @@ def parse_lessons_json(raw):
             image_value = lesson.get("image", "")
             image = string_field("" if image_value is None else image_value, "步骤图片", 500) or None
             duration = lesson.get("duration", 10)
-            if type(duration) is not int or not 1 <= duration <= 600:
+            draft_duration_placeholder = allow_incomplete and type(duration) is int and duration == 0
+            if not draft_duration_placeholder and (type(duration) is not int or not 1 <= duration <= 600):
                 raise ValueError("学习时长须为 1～600 的整数")
             preview = lesson.get("preview", lesson.get("isPreview", index == 0))
             if type(preview) is not bool:
@@ -223,6 +227,23 @@ def parse_lessons_json(raw):
         return None, cleaned
     except (ValueError, TypeError) as error:
         return str(error), None
+
+
+def validate_toolkit_completeness(title, description, lessons):
+    if not title.strip():
+        raise APIError("请填写工具包名称")
+    if not description.strip():
+        raise APIError("请填写工具包介绍")
+    if not lessons:
+        raise APIError("请至少添加一个教程步骤")
+    for index, (lesson_title, duration, content, has_document) in enumerate(lessons):
+        if not lesson_title.strip():
+            raise APIError(f"请填写第 {index + 1} 步的标题")
+        if type(duration) is not int or not 1 <= duration <= 600:
+            raise APIError(f"第 {index + 1} 步的学习时长须为 1～600 分钟的整数")
+        if not isinstance(content, str) or not content.strip():
+            if not has_document:
+                raise APIError(f"请填写第 {index + 1} 步正文，或上传教程原件")
 
 
 def _canonical_lesson_image(value):
@@ -630,14 +651,18 @@ def get_toolkit(toolkit_id):
 
 def _single_item(partial=False):
     data = json_object() if request.is_json else request.form
+    status = data.get("status") if not partial else None
+    if status is not None and status not in {"draft", "published"}:
+        raise APIError("状态无效")
+    allow_incomplete = not partial and status == "draft"
     if partial:
         fields = {"_partial_fields": dict(data), "cover_url": None}
     else:
-        error, fields = toolkit_form_errors(data)
+        error, fields = toolkit_form_errors(data, allow_incomplete=allow_incomplete)
         if error:
             raise APIError(error)
         fields["cover_url"] = fields["cover"]
-    error, lessons = parse_lessons_json(data.get("lessons"))
+    error, lessons = parse_lessons_json(data.get("lessons"), allow_incomplete=allow_incomplete)
     if error:
         raise APIError(error)
     if partial and "lessons" not in data:
@@ -646,9 +671,6 @@ def _single_item(partial=False):
     if len(files) > MAX_BATCH_RESOURCES:
         raise APIError(f"附件不能超过 {MAX_BATCH_RESOURCES} 个")
     streams = [(f.stream, f.filename) for f in files]
-    status = data.get("status") if not partial else None
-    if status is not None and status not in {"draft", "published"}:
-        raise APIError("状态无效")
     # Extract lesson document files (lesson_file_0, lesson_file_1, etc.)
     lesson_files = []
     for i in range(len(lessons) if lessons else 0):
@@ -660,6 +682,11 @@ def _single_item(partial=False):
         for i, lesson in enumerate(lessons):
             if i < len(lesson_files) and lesson_files[i]:
                 lesson["_file"] = lesson_files[i]
+    if not partial and status != "draft":
+        validate_toolkit_completeness(fields["title"], fields["description"], [
+            (lesson["title"], lesson["duration"], lesson["content"], bool(lesson.get("_file")))
+            for lesson in lessons
+        ])
 
     return {**fields, "cover_file": None, "resource_files": [], "resource_streams": streams,
             "status": status, "lessons": lessons}
@@ -719,6 +746,14 @@ def update_status(toolkit_id):
                        or (toolkit.status in {"published", "draft"} and status == "offline"))
             if not allowed:
                 raise APIError("作者只能发布草稿或下架自己的工具包", 403)
+        if status == "published":
+            lessons = session.execute(select(Lesson).where(Lesson.toolkit_id == toolkit_id)
+                                      .options(undefer(Lesson.content))
+                                      .order_by(Lesson.sort_order, Lesson.id)).scalars().all()
+            validate_toolkit_completeness(toolkit.title, toolkit.description, [
+                (lesson.title, lesson.duration, lesson.content, bool(lesson.raw_file_path))
+                for lesson in lessons
+            ])
         toolkit.status = status
         session.flush()
         result = toolkit.serialize(user.id, user=user)

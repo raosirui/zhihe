@@ -366,7 +366,8 @@ def test_file_batch_shared_cover_and_protected_images(env):
     assert client.delete(f"/api/toolkits/{tids[0]}", headers=headers["seller"]).json["mode"] == "deleted"
     assert shared.exists() and client.get(detail["cover"]).status_code == 200
     # Public reuse creates a reference, not ownership/deletion capabilities.
-    reuse = client.post("/api/toolkits", json={"title": "reuse", "description": "desc", "cover": detail["cover"]}, headers=headers["other"])
+    reuse = client.post("/api/toolkits", json={"title": "reuse", "description": "desc", "cover": detail["cover"],
+                           "lessons": [{"title": "intro", "content": "body"}]}, headers=headers["other"])
     assert reuse.status_code == 201, reuse.json
     assert client.delete(f"/api/toolkits/{tids[1]}", headers=headers["seller"]).json["mode"] == "deleted"
     assert shared.exists()
@@ -409,7 +410,8 @@ def test_batch_counts_skipped_and_commit_ack_recovery(env, monkeypatch):
             raise SQLAlchemyError("simulated lost commit acknowledgement")
         return result
     monkeypatch.setattr(SessionTransaction, "commit", lost_ack)
-    response = client.post("/api/toolkits", json={"title": "committed", "description": "desc"}, headers=headers["seller"])
+    response = client.post("/api/toolkits", json={"title": "committed", "description": "desc",
+                               "lessons": [{"title": "intro", "content": "body"}]}, headers=headers["seller"])
     assert injected["done"] and response.status_code == 201, response.json
     with app.app_context():
         assert Toolkit.query.filter_by(title="committed").count() == 1
@@ -456,7 +458,9 @@ def test_file_io_fail_isolated(env, monkeypatch):
     app, client, _, headers, uploads = env
     import file_service
     monkeypatch.setattr(file_service.os, "replace", lambda *args: (_ for _ in ()).throw(OSError("isolated injected error")))
-    response = client.post("/api/toolkits", data={"title": "fail", "description": "desc", "resource": (io.BytesIO(b"data"), "test.py")}, headers=headers["seller"])
+    response = client.post("/api/toolkits", data={"title": "fail", "description": "desc",
+                          "lessons": json.dumps([{"title": "intro", "content": "body"}]),
+                          "resource": (io.BytesIO(b"data"), "test.py")}, headers=headers["seller"])
     assert response.status_code == 503
     assert "isolated injected" not in str(response.json)
     with app.app_context():
@@ -475,9 +479,11 @@ def test_reject_private_cover_and_preserve_legacy_without_deletion(env):
         db.session.add_all([private, legacy])
         db.session.commit()
         legacy_id = legacy.id
-    assert client.post("/api/toolkits", json={"title": "attack", "description": "desc", "cover": "/api/uploads/" + stored},
+    assert client.post("/api/toolkits", json={"title": "attack", "description": "desc", "cover": "/api/uploads/" + stored,
+                       "lessons": [{"title": "intro", "content": "body"}]},
                        headers=headers["other"]).status_code == 403
-    response = client.post("/api/toolkits", json={"title": "legacy", "description": "desc", "cover": "/api/uploads/" + public}, headers=headers["other"])
+    response = client.post("/api/toolkits", json={"title": "legacy", "description": "desc", "cover": "/api/uploads/" + public,
+                               "lessons": [{"title": "intro", "content": "body"}]}, headers=headers["other"])
     assert response.status_code == 201, response.json
     (uploads / "image").mkdir(parents=True)
     (uploads / "image" / public).write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
@@ -498,7 +504,9 @@ def test_file_quota_and_skipped_does_not_reserve(env):
     assert response["created"] == 1, response
     retry = run_batch(env, package([item], {"tiny.py": b"12345"}), "p.zip")
     assert retry["skipped"] == 1 and retry["failed"] == 0, retry
-    over = client.post("/api/toolkits", data={"title": "over", "description": "desc", "resource": (io.BytesIO(b"1"), "more.py")}, headers=headers["seller"])
+    over = client.post("/api/toolkits", data={"title": "over", "description": "desc",
+                          "lessons": json.dumps([{"title": "intro", "content": "body"}]),
+                          "resource": (io.BytesIO(b"1"), "more.py")}, headers=headers["seller"])
     assert over.status_code == 409, over.json
     with app.app_context():
         assert FileAsset.query.count() == 1 and FileReference.query.count() == 1
@@ -798,7 +806,9 @@ def test_review_chinese_image_resource_upload_roundtrip(env):
     resource = client.get(f"/api/toolkits/{tid}/download", headers=headers["seller"])
     assert resource.data == b"print('safe attachment')"
     resource.close()
-    single = client.post("/api/toolkits", data={"title": "单项中文", "description": "desc", "resource": (io.BytesIO(b"single"), "脚本.py")}, headers=headers["seller"])
+    single = client.post("/api/toolkits", data={"title": "单项中文", "description": "desc",
+                           "lessons": json.dumps([{"title": "intro", "content": "body"}]),
+                           "resource": (io.BytesIO(b"single"), "脚本.py")}, headers=headers["seller"])
     assert single.status_code == 201 and single.json["resourceName"].endswith(".py"), single.json
     # Both single and batch call the same image/filename preparation service.
     from file_service import UploadContext
