@@ -18,7 +18,7 @@ async function loginUI(page: Page, account: Account) {
   await page.goto('/')
   await page.getByRole('button', { name: '登录 / 注册', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: '登录知核' })
-  await dialog.getByLabel('账号', { exact: true }).fill(account.username)
+  await dialog.locator('input[autocomplete="username"]').fill(account.username)
   await dialog.getByLabel('密码', { exact: true }).fill(account.password)
   expect(await dialog.getByLabel('密码', { exact: true }).evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true)
   const response = page.waitForResponse(r => new URL(r.url()).pathname === '/api/auth/login' && r.request().method() === 'POST')
