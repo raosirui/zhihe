@@ -60,14 +60,14 @@
 
 教程文档阅读组件目前支持以下类型：
 
-- Markdown（`.md`）
+- Markdown（`.md` / `.markdown`）及纯文本（`.txt`）
 - Word（`.docx`）
 - PDF（`.pdf`）
 - HTML（`.html` / `.htm`）
 - RTF（`.rtf`）
 - PowerPoint（`.pptx`）
 
-文档转换和阅读分别位于 `backend/document_converter.py` 与 `frontend/src/components/DocumentRenderer.tsx`。支持预览不代表原始文件公开：原件和配套资源仍受登录、作者身份或购买权益检查保护。SVG、HTML 等内容也受上传验证和安全渲染约束。
+文档转换和阅读分别位于 `backend/document_converter.py` 与 `frontend/src/components/DocumentRenderer.tsx`。支持预览不代表原始文件公开：教程原件按教程学习权限检查（公开的免费或试看步骤可能允许匿名下载）；配套资源下载仍需登录及相应权益。SVG、HTML 等内容也受上传验证和安全渲染约束。
 
 ## 环境要求与安装
 
@@ -249,11 +249,13 @@ GET  /api/batch/jobs
 GET  /api/batch/jobs/{job_id}
 ```
 
-批量包为 ZIP，清单文件是 UTF-8 的 `toolkits.json`，教程正文、封面和资源由清单引用。先用 `backend/batch_publish_cli.py` 的 `init`、`validate`、`pack` 命令在本地生成和检查包。转换/打包只处理清单引用的安全文件，不应包含秘密文件、符号链接或输出 ZIP 本身。
+批量包为 ZIP，清单是 UTF-8 的 `toolkits.json`（非空数组；兼容 `{"toolkits": [...]}`）。每节教程可用 `content`（Markdown 文本）或 `contentFile`（ZIP 内 UTF-8 正文文件），两者不能并用；也可选填 `documentFile`（ZIP 内相对路径的原始教学文档，支持 `.md`、`.markdown`、`.txt`、`.docx`、`.pdf`、`.html`、`.htm`、`.rtf`、`.pptx`）。原始文档可以单独提供，也可以与正文搭配；没有原始文档时须有非空正文，Markdown 类原件也须遵守 1 MiB 正文限制。模板第一节将同一个 `.md` 同时用作 `contentFile` 与 `documentFile`，并演示封面、教程图片、`resource` 与 `resources` 两项附件。`preview` 影响教程及其原件的学习权限：已发布的免费教程或付费试看步骤可能允许匿名下载原件，请勿在试看步骤放入敏感文档；锁定步骤仍须通过购买等权益检查。**配套资源附件下载另须登录并具备下载权益**。
 
-上传接口以 HTTP `202` 返回任务 ID，后台 worker 异步执行；客户端通过 `/api/batch/jobs/{job_id}` 轮询状态和逐项结果。任务和认领状态由数据库持久化并原子更新；ZIP 暂存文件位于 `UPLOAD_FOLDER` 下，需确保 worker 能持续访问。结果区分 `created`、`failed`、`skipped` 等状态。
+下载 `/api/batch/skill` 只取得转换器 ZIP，不代表安装或执行；它包含 `SKILL.md`、`references/format.md`、`scripts/build_batch.py`、同目录共享的 `scripts/validation.py` 及清单示例。可用该标准库脚本或仓库里的 `backend/batch_publish_cli.py` 依次运行 `init`、`validate`、`pack`。本地 `validate` 验证结构、安全路径、引用文件存在/大小和 UTF-8 正文，**不验证** ZIP 内所有成员完整性、图片/原始文档实际内容及服务端转换、配额、权限或与线上已有工具包的冲突；`pack` 仅收入清单显式引用文件（包括 `documentFile`，相同路径仅打包一次），不扫描目录或夹带未引用的模板 README、秘密文件及输出 ZIP；请勿显式引用秘密文件或输出 ZIP，符号链接也会被拒绝。已有模板或输出默认拒绝覆盖，明确确认后才能使用 `--force`。
 
-当前包和清单还受多层限制，包括最多 50 个工具包、每个工具包最多 50 个教程、每个工具包最多 20 个资源、请求/压缩包上限 100 MiB、展开总量上限 300 MiB、ZIP 成员上限 2000、单个成员上限 40 MiB，以及清单和文本长度限制。服务端还会校验安全路径、重复路径、图像内容、资源引用和文件预算；具体约束以 `backend/batch_kit.py` 与模板内说明为准。
+上传接口以 HTTP `202` 返回任务 ID，后台 worker 异步执行；客户端通过 `/api/batch/jobs/{job_id}` 轮询状态和逐项结果。任务和认领状态由数据库持久化并原子更新；ZIP 输入在私有暂存中保存，需确保 worker 能持续访问。`mode=skip` 跳过同一作者同名的已有工具包（含草稿）；`mode=update` 更新同名工具包但保留其已有发布状态；`mode=create` 不去重。`publish` 仅决定新建条目的发布或草稿状态。更新时教程可提供属于目标工具包的正整数 `id` 进行匹配，否则按位置匹配；重排教程务必传原 `id`，以免原件或图片关联到错误步骤。更新省略 `lessons` 会保留旧步骤（显式 `[]` 可清空草稿，上架不得清空）；更新未传附件会保留原附件及其下载引用；未传 `documentFile` 会保留匹配教程的原件；保留非 Markdown 原件时不能只更改正文，须替换原件或清除旧原件。若要移除，须传 `clearDocument: true` 与新的非空 `content` 或 `contentFile`，且不能同时提供 `documentFile`。逐项结果区分 `created`、`updated`、`failed`、`skipped`。
+
+当前包和清单还受多层限制，包括最多 50 个工具包、每个工具包最多 50 个教程、每个工具包最多 20 个资源、请求体上限 100 MiB、ZIP 压缩体上限 100 MiB 减 64 KiB（预留 multipart 表单空间）、展开总量上限 300 MiB、ZIP 成员上限 2000、单个成员上限 40 MiB、清单上限 2 MiB、正文及 Markdown 类原件单节上限 1 MiB、累计解析文本上限 20 MiB；转换后预览每节最多 4 MiB、每工具包累计最多 20 MiB。服务端还会校验安全路径、重复路径、图像和文档实际格式/内容、资源引用、转换与文件预算；单成员上限不保证原件通过服务端检查，具体约束以 `backend/batch_kit.py`、`backend/validation.py` 与模板内说明为准。
 
 ## 主要 API 路由
 

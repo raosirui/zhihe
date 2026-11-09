@@ -8,15 +8,19 @@ import hashlib
 import json
 import os
 import stat
+import shutil
+import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from sqlalchemy import func, update
+from sqlalchemy import func, select, update
 
 from document_converter import convert_document
 from extensions import db
-from models import Lesson
+from models import FileReference, Lesson
+from file_service import open_asset
 
 FORMATS = {"word": (".docx",), "html": (".html", ".htm"), "richtext": (".rtf",)}
 
@@ -52,6 +56,37 @@ def private_raw(app, lesson):
     return resolved
 
 
+def _raw_asset(lesson):
+    ref = db.session.execute(select(FileReference).where(
+        FileReference.lesson_id == lesson.id, FileReference.toolkit_id == lesson.toolkit_id,
+        FileReference.usage == "lesson_raw")).scalar_one_or_none()
+    return ref.asset if ref else None
+
+
+@contextmanager
+def raw_source(app, lesson):
+    asset = _raw_asset(lesson)
+    if not asset:
+        yield private_raw(app, lesson)
+        return
+    expected = FORMATS.get(lesson.content_type)
+    suffix = Path(asset.stored_name).suffix.lower()
+    if (not expected or suffix not in expected or asset.purpose != "lesson_raw" or
+            asset.state not in {"active", "legacy", "retained"} or asset.size > app.config["FILE_MAX_SIZE"]):
+        raise ValueError("课程没有可重建的私有原件")
+    with tempfile.TemporaryDirectory(prefix="zhihe-raw-preview-") as staging:
+        path = Path(staging) / ("original" + suffix)
+        with open_asset(asset) as source, path.open("wb") as target:
+            shutil.copyfileobj(source, target, 128 * 1024)
+        yield path
+
+
+def _same_raw(lesson_id, asset_id):
+    current = select(FileReference.asset_id).where(
+        FileReference.lesson_id == lesson_id, FileReference.usage == "lesson_raw").scalar_subquery()
+    return current == asset_id if asset_id is not None else current.is_(None)
+
+
 def _backup_dir(app, directory):
     path = Path(directory).resolve(strict=True)
     upload_root = Path(app.config["UPLOAD_FOLDER"]).resolve(strict=True)
@@ -63,13 +98,14 @@ def _backup_dir(app, directory):
     return path
 
 
-def _save_backup(directory, lesson, old_html, new_html, raw_sha):
+def _save_backup(directory, lesson, old_html, new_html, raw_sha, raw_asset_id):
     name = f"lesson_{lesson.id}_{datetime.now(timezone.utc):%Y%m%dT%H%M%S}_{uuid4().hex[:8]}.json"
     path = directory / name
     payload = {
         "lessonId": lesson.id,
         "contentType": lesson.content_type,
         "rawFilePath": lesson.raw_file_path,
+        "rawAssetId": raw_asset_id,
         "rawSha256": raw_sha,
         "oldHtml": old_html,
         "newSha256": digest(new_html),
@@ -89,12 +125,14 @@ def rebuild(app, ids, apply=False, backup_dir=None):
                 lesson = db.session.get(Lesson, lesson_id)
                 if lesson is None:
                     raise ValueError("找不到课程")
-                raw = private_raw(app, lesson)
+                asset = _raw_asset(lesson)
+                raw_asset_id = asset.id if asset else None
                 original = lesson.converted_html
-                raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
-                updated = convert_document(str(raw), lesson.content_type)
-                if hashlib.sha256(raw.read_bytes()).hexdigest() != raw_sha:
-                    raise ValueError("原件在转换期间发生变化，拒绝写入")
+                with raw_source(app, lesson) as raw:
+                    raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+                    updated = convert_document(str(raw), lesson.content_type)
+                    if hashlib.sha256(raw.read_bytes()).hexdigest() != raw_sha:
+                        raise ValueError("原件在转换期间发生变化，拒绝写入")
                 if not updated:
                     raise ValueError("转换结果为空，已保留原有展示")
                 if updated == original:
@@ -104,10 +142,11 @@ def rebuild(app, ids, apply=False, backup_dir=None):
                       f" ({len(original or '')} -> {len(updated)} characters)")
                 if not apply:
                     continue
-                backup_path = _save_backup(directory, lesson, original, updated, raw_sha)
+                backup_path = _save_backup(directory, lesson, original, updated, raw_sha, raw_asset_id)
                 result = db.session.execute(update(Lesson).where(
                     Lesson.id == lesson_id,
                     Lesson.raw_file_path == lesson.raw_file_path,
+                    _same_raw(lesson_id, raw_asset_id),
                     Lesson.content_type == lesson.content_type,
                     unchanged_html(original),
                 ).values(converted_html=updated))
@@ -129,15 +168,20 @@ def restore(app, backup_file):
         lesson = db.session.get(Lesson, data["lessonId"])
         if lesson is None or lesson.content_type != data["contentType"] or lesson.raw_file_path != data["rawFilePath"]:
             raise ValueError("备份与当前课程不匹配")
-        raw = private_raw(app, lesson)
-        if hashlib.sha256(raw.read_bytes()).hexdigest() != data["rawSha256"]:
-            raise ValueError("原件发生变化，不能自动回滚")
+        asset = _raw_asset(lesson)
+        raw_asset_id = asset.id if asset else None
+        if raw_asset_id != data.get("rawAssetId"):
+            raise ValueError("课程原件引用发生变化，不能自动回滚")
+        with raw_source(app, lesson) as raw:
+            if hashlib.sha256(raw.read_bytes()).hexdigest() != data["rawSha256"]:
+                raise ValueError("原件发生变化，不能自动回滚")
         current = lesson.converted_html
         if digest(current) != data["newSha256"]:
             raise ValueError("派生内容发生变化，不能覆盖后续编辑")
         result = db.session.execute(update(Lesson).where(
             Lesson.id == lesson.id,
             Lesson.raw_file_path == data["rawFilePath"],
+            _same_raw(lesson.id, raw_asset_id),
             Lesson.content_type == data["contentType"],
             unchanged_html(current),
         ).values(converted_html=data["oldHtml"]))

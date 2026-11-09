@@ -5,24 +5,29 @@ committed reference change and a fresh locked reference check. Legacy files
 without registry entries are served conservatively and never scanned/deleted.
 """
 import hashlib
+import mimetypes
 import os
 import re
+import stat
+import tempfile
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
-from flask import current_app
+from urllib.parse import quote, urlsplit
+from flask import Response, current_app
 from sqlalchemy import select, delete, or_
 from sqlalchemy.orm import Session
 from PIL import Image, UnidentifiedImageError
 from defusedxml import ElementTree as SafeET
 from extensions import db
+import storage
 from models import FileAsset, FileReference, FileOperation, Toolkit, Lesson, User, ASSET_PATH, LESSON_ASSET_PATH
 from security import APIError, assert_identity
 from money_service import lock_users
-from validation import IMAGE_EXTENSIONS, REJECTED_RESOURCE_EXTENSIONS, string_field, image_source
+from validation import IMAGE_EXTENSIONS, rejected_resource_extension, string_field, image_source
 
 STORED_NAME_RE = re.compile(r"^[0-9a-f]{32}_[A-Za-z0-9._\-]{1,200}$")
-KINDS = {"image", "resource", "asset"}
+KINDS = {"image", "resource", "asset", "lesson_raw"}
 
 
 def safe_stored_name(stored):
@@ -37,8 +42,153 @@ def directory(kind):
 
 def init_storage():
     root = Path(current_app.config["UPLOAD_FOLDER"])
-    for kind in [*KINDS, ".staging", ".batches"]:
+    kinds = KINDS if current_app.config["FILE_STORAGE_BACKEND"] == "local" else ()
+    for kind in [*kinds, ".staging", ".batches"]:
         (root / kind).mkdir(parents=True, exist_ok=True)
+
+
+def _asset_backend(asset):
+    backend = asset.storage_backend or "local"  # Historical rows predate object storage.
+    if backend == "s3" and asset.object_key:
+        storage._check_key(asset.object_key)
+    elif backend == "local" and not asset.object_key:
+        pass
+    else:
+        # Never fall back to a similarly named local file for a mapped object.
+        raise ValueError("Invalid asset storage mapping")
+    return backend
+
+
+@contextmanager
+def open_asset(asset):
+    """Yield a seekable verified binary stream; caller must enforce authorization.
+
+    S3 content is bounded, checked against SHA-256 and downloaded into an
+    automatically unlinked temporary file (never kept in process memory).
+    """
+    if asset.state not in {"ready", "active", "retained", "legacy"}:
+        raise FileNotFoundError("Asset is not available")
+    backend = _asset_backend(asset)
+    if backend == "s3":
+        init_storage()
+        with tempfile.TemporaryFile(mode="w+b", dir=directory_staging()) as stream:
+            # Pre-registry lesson originals can be as large as the request cap.
+            # Keep images and other resources at their normal per-file limit.
+            maximum = (current_app.config["MAX_CONTENT_LENGTH"] if asset.purpose == "lesson_raw"
+                       else current_app.config["FILE_MAX_SIZE"])
+            storage.read_to_file(asset.object_key, stream, asset.size, asset.sha256, maximum)
+            yield stream
+    else:
+        if not safe_stored_name(asset.stored_name):
+            raise ValueError("Invalid local stored name")
+        path = directory(asset.purpose) / asset.stored_name
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("Local asset is not a regular file")
+            with os.fdopen(fd, "rb") as stream:
+                fd = -1
+                yield stream
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+
+def directory_staging():
+    return Path(current_app.config["UPLOAD_FOLDER"]) / ".staging"
+
+
+_INLINE_PREVIEW_TYPES = {
+    "image/png": "PNG", "image/jpeg": "JPEG", "image/gif": "GIF",
+    "image/webp": "WEBP", "application/pdf": "PDF",
+}
+
+
+def _validate_inline_preview(stream, mime):
+    """Inspect the actual content before allowing a resource to render inline."""
+    size = os.fstat(stream.fileno()).st_size
+    if size > current_app.config["FILE_MAX_SIZE"]:
+        raise ValueError("Preview exceeds the file size limit")
+    stream.seek(0)
+    if mime == "application/pdf":
+        if stream.read(5) != b"%PDF-":
+            raise ValueError("Invalid PDF preview")
+    else:
+        try:
+            with Image.open(stream) as image:
+                if image.format != _INLINE_PREVIEW_TYPES[mime]:
+                    raise ValueError("Preview image format mismatch")
+                width, height = image.size
+                if (min(width, height) < 1 or
+                        max(width, height) > current_app.config["IMAGE_MAX_DIMENSION"] or
+                        width * height > current_app.config["IMAGE_MAX_PIXELS"]):
+                    raise ValueError("Preview image dimensions exceed limits")
+                image.verify()
+            stream.seek(0)
+            with Image.open(stream) as image:
+                pixels = frames = 0
+                while True:
+                    width, height = image.size
+                    frames += 1
+                    pixels += width * height
+                    if frames > 200 or pixels > current_app.config["IMAGE_MAX_PIXELS"]:
+                        raise ValueError("Preview animation exceeds limits")
+                    image.load()
+                    try:
+                        image.seek(frames)
+                    except EOFError:
+                        break
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError,
+                Image.DecompressionBombWarning) as exc:
+            raise ValueError("Invalid image preview") from exc
+    stream.seek(0)
+
+
+def send_asset(asset, download_name=None, as_attachment=False, mimetype=None, inline_preview=False):
+    """Return a private, no-store Flask response for an already authorized row."""
+    if not safe_stored_name(asset.stored_name):
+        raise ValueError("Invalid stored name")
+    filename = download_name or asset.stored_name.split("_", 1)[1]
+    if (not isinstance(filename, str) or len(filename) > 255 or not filename or
+            any(c in filename for c in ("/", "\\", "\r", "\n", "\x00")) or
+            any(ord(c) < 32 or ord(c) == 127 for c in filename)):
+        raise ValueError("Invalid download name")
+    # A display filename may be user controlled; derive default MIME only from
+    # the validated immutable stored name, never from Content-Disposition.
+    effective_mime = mimetype or mimetypes.guess_type(asset.stored_name)[0] or "application/octet-stream"
+    if inline_preview and (asset.purpose != "resource" or as_attachment or
+                           effective_mime not in _INLINE_PREVIEW_TYPES):
+        raise ValueError("Inline preview requires a safe resource MIME type")
+    # Documents and arbitrary resources must never execute as same-origin HTML.
+    attachment = as_attachment or (asset.purpose not in {"image", "asset"} and not inline_preview)
+    handle = open_asset(asset)
+    try:
+        stream = handle.__enter__()  # Open and verify before sending response headers.
+    except FileNotFoundError as exc:
+        if _asset_backend(asset) == "local":
+            raise APIError("文件不存在", 404) from exc
+        raise  # S3 failure is never interpreted as a missing local file.
+    try:
+        if inline_preview:
+            _validate_inline_preview(stream, effective_mime)
+        response = Response(iter(lambda: stream.read(128 * 1024), b""), mimetype=effective_mime)
+        response.content_length = os.fstat(stream.fileno()).st_size
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if inline_preview:
+            response.headers["Content-Security-Policy"] = "sandbox"
+        from werkzeug.utils import secure_filename
+        fallback = secure_filename(filename) or "download"
+        response.headers["Content-Disposition"] = (
+            f'{"attachment" if attachment else "inline"}; filename="{fallback}"; '
+            f"filename*=UTF-8''{quote(filename, safe='')}")
+        response.call_on_close(lambda: handle.__exit__(None, None, None))
+        return response
+    except BaseException:
+        import sys
+        handle.__exit__(*sys.exc_info())
+        raise
 
 
 def _validate_svg(path):
@@ -154,13 +304,19 @@ class UploadContext:
         suffix = Path(name).suffix.lower()
         if kind in {"image", "asset"} and suffix not in IMAGE_EXTENSIONS:
             raise ValueError("图片类型不受支持")
-        if kind == "resource" and any("." + part.lower() in REJECTED_RESOURCE_EXTENSIONS for part in original_name.split(".")[1:]):
+        if kind == "lesson_raw":
+            from document_converter import detect_content_type
+            if not detect_content_type(original_name):
+                raise ValueError("文档文件名无效")
+        if kind == "resource" and rejected_resource_extension(original_name):
             raise ValueError("不支持该类型的资源附件")
         maximum = current_app.config["FILE_MAX_SIZE"]
         reserve = maximum if size is None else size
         if type(reserve) is not int or not 0 <= reserve <= maximum:
             raise ValueError("文件超过单文件大小限制")
         op_id, stored = uuid.uuid4().hex, f"{uuid.uuid4().hex}_{name}"
+        backend = current_app.config["FILE_STORAGE_BACKEND"]
+        object_key = f"files/{uuid.uuid4().hex}" if backend == "s3" else None
         # Reservation and operation record commit before creating the file.
         with Session(db.engine, expire_on_commit=False) as session, session.begin():
             owner = lock_users(session, [self.identity.uid])[self.identity.uid]
@@ -170,14 +326,14 @@ class UploadContext:
             if used + reserve > current_app.config["FILE_USER_QUOTA"]:
                 raise APIError("文件配额不足", 409, "FILE_QUOTA_EXCEEDED")
             asset = FileAsset(stored_name=stored, owner_id=owner.id, purpose=kind, size=reserve,
-                              state="staging", is_public=False)
+                              state="staging", is_public=False,
+                              storage_backend=backend, object_key=object_key)
             session.add(asset)
             session.flush()
             session.add(FileOperation(id=op_id, asset_id=asset.id, action="upload", status="staging"))
             asset_id = asset.id
         self.new_assets.add(asset_id)
         staging = Path(current_app.config["UPLOAD_FOLDER"]) / ".staging" / op_id
-        final = directory(kind) / stored
         try:
             init_storage()
             actual, digest = 0, hashlib.sha256()
@@ -203,12 +359,17 @@ class UploadContext:
                 raise ValueError("文件读取长度与登记长度不符")
             if kind in {"image", "asset"}:
                 validate_image(staging, suffix)
-            os.replace(staging, final)
-            directory_fd = os.open(final.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            if backend == "s3":
+                storage.put_file(object_key, staging, actual, digest.hexdigest())
+                staging.unlink(missing_ok=True)
+            else:
+                final = directory(kind) / stored
+                os.replace(staging, final)
+                directory_fd = os.open(final.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
             with Session(db.engine) as session, session.begin():
                 owner = lock_users(session, [self.identity.uid])[self.identity.uid]
                 assert_identity(session, owner, self.identity)
@@ -298,7 +459,14 @@ def bind_reference(session, asset, identity, toolkit_id, usage, lesson_id=None, 
     elif usage == "lesson":
         if not preserve and (asset.purpose not in {"asset", "image"} or not (owned or (asset.purpose == "image" and asset.is_public))):
             raise APIError("无权绑定此教程图片", 403)
-    key = binding_key or (f"lesson:{lesson_id}:image" if usage == "lesson" else f"toolkit:{toolkit_id}:{usage}")
+    elif usage == "lesson_raw":
+        if not lesson_id or asset.purpose != "lesson_raw" or not owned:
+            raise APIError("无权绑定此教程原文件", 403)
+    else:
+        raise APIError("未知文件用途", 400)
+    key = binding_key or (f"lesson:{lesson_id}:image" if usage == "lesson" else
+                          f"lesson:{lesson_id}:raw" if usage == "lesson_raw" else
+                          f"toolkit:{toolkit_id}:{usage}")
     session.add(FileReference(asset_id=asset.id, toolkit_id=toolkit_id, lesson_id=lesson_id,
                               usage=usage, binding_key=key, name=name, sort_order=sort_order))
     if asset.state != "legacy":
@@ -307,8 +475,11 @@ def bind_reference(session, asset, identity, toolkit_id, usage, lesson_id=None, 
         operation.status = "committed"
 
 
-def unbind_toolkit(session, toolkit_id, locked_assets):
-    session.execute(delete(FileReference).where(FileReference.toolkit_id == toolkit_id))
+def unbind_toolkit(session, toolkit_id, locked_assets, preserved_reference_ids=()):
+    statement = delete(FileReference).where(FileReference.toolkit_id == toolkit_id)
+    if preserved_reference_ids:
+        statement = statement.where(FileReference.id.notin_(preserved_reference_ids))
+    session.execute(statement)
     for asset in locked_assets.values():
         session.add(FileOperation(id=uuid.uuid4().hex, asset_id=asset.id, action="reclaim", status="pending"))
 
@@ -327,9 +498,15 @@ def _legacy_references(session, asset):
                                         Toolkit.resource_path == asset.stored_name))
     if session.execute(query).first():
         return True
-    return bool(session.execute(select(Lesson.id).where(or_(Lesson.image == "file:" + asset.stored_name,
-                                    Lesson.image == ASSET_PATH + asset.stored_name,
-                                    Lesson.image == LESSON_ASSET_PATH + asset.stored_name))).first())
+    if session.execute(select(Lesson.id).where(or_(Lesson.image == "file:" + asset.stored_name,
+                                                 Lesson.image == ASSET_PATH + asset.stored_name,
+                                                 Lesson.image == LESSON_ASSET_PATH + asset.stored_name))).first():
+        return True
+    if asset.purpose == "lesson_raw" and _asset_backend(asset) == "local":
+        # Protect older raw-file records even when they lack FileReference.
+        legacy_path = str(directory("lesson_raw") / asset.stored_name)
+        return bool(session.execute(select(Lesson.id).where(Lesson.raw_file_path == legacy_path)).first())
+    return False
 
 
 def reclaim_asset(asset_id, failed_upload=False):
@@ -337,8 +514,20 @@ def reclaim_asset(asset_id, failed_upload=False):
     with Session(db.engine) as session, session.begin():
         asset = session.execute(select(FileAsset).where(FileAsset.id == asset_id).with_for_update()
                                 .execution_options(populate_existing=True)).scalar_one_or_none()
-        if not asset or asset.owner_id is None or asset.state == "legacy" or asset.state == "deleted":
+        if not asset or asset.owner_id is None or asset.state == "deleted":
             return False
+        if asset.state == "legacy":
+            # Older migration revisions registered owned S3 lesson originals as
+            # legacy. Only their verified private object mapping is reclaimable;
+            # never unlink a historical local original, even if it has an owner.
+            if (asset.purpose != "lesson_raw" or asset.storage_backend != "s3" or
+                    not isinstance(asset.sha256, str) or
+                    not re.fullmatch(r"[0-9a-f]{64}", asset.sha256)):
+                return False
+            try:
+                storage._check_key(asset.object_key)
+            except ValueError:
+                return False
         refs = session.execute(select(FileReference.id).where(FileReference.asset_id == asset_id).with_for_update()).first()
         if refs or _legacy_references(session, asset):
             return False
@@ -350,7 +539,12 @@ def reclaim_asset(asset_id, failed_upload=False):
         session.add(op)
         session.flush()
         try:
-            (directory(asset.purpose) / asset.stored_name).unlink(missing_ok=True)
+            if _asset_backend(asset) == "s3":
+                storage.delete_file(asset.object_key)
+            else:
+                if not safe_stored_name(asset.stored_name):
+                    raise ValueError("Invalid local stored name")
+                (directory(asset.purpose) / asset.stored_name).unlink(missing_ok=True)
             # A crashed writer may have left the operation's private staging
             # file instead of a final file. Only known operation IDs are used;
             # never scan the staging directory or unknown legacy uploads.
@@ -359,7 +553,8 @@ def reclaim_asset(asset_id, failed_upload=False):
             for upload in operations:
                 if re.fullmatch(r"[0-9a-f]{32}", upload.id):
                     (Path(current_app.config["UPLOAD_FOLDER"]) / ".staging" / upload.id).unlink(missing_ok=True)
-        except OSError:
+        except Exception:
+            current_app.logger.warning("File reclaim failed; retained asset %s", asset_id)
             asset.state = "retained"
             op.status = "retained"
             return False

@@ -159,15 +159,63 @@ class BatchTests(TemporaryTests):
 
     def test_template_and_long_chinese_roundtrip(self):
         with zipfile.ZipFile(batch_kit.build_template_zip()) as archive:
+            self.assertEqual(set(archive.namelist()), {"toolkits.json", *batch_kit.DEMO_FILES})
+            self.assertEqual(json.loads(archive.read("toolkits.json")), [batch_kit.SAMPLE_ITEM])
+            self.assertIn(b"documentFile", archive.read("README.txt"))
             parsed, errors = batch_kit.load_batch_package(archive, self.stage)
         self.assertFalse(errors)
         self.assertEqual(len(parsed), 1)
-        self.assertEqual(parsed[0]["resource_name"], "gsea_helper.sh")
-        self.assertIsInstance(parsed[0]["price"], Decimal)
+        toolkit = parsed[0]
+        self.assertEqual([file["name"] for file in toolkit["resource_files"]], ["gsea_helper.sh", "demo-genes.gmt"])
+        self.assertEqual(toolkit["cover_file"]["cache_key"], "covers/demo-cover.svg")
+        first = toolkit["lessons"][0]
+        self.assertEqual(first["image_file"]["cache_key"], "lessons/gsea-flow.svg")
+        self.assertEqual(first["content"], batch_kit.DEMO_LESSON_MD.strip())
+        self.assertEqual(first["_file"]["cache_key"], "lessons/01-prepare.md")
+        self.assertEqual(Path(first["_file"]["path"]).read_text(encoding="utf-8"), batch_kit.DEMO_LESSON_MD)
+        self.assertEqual(toolkit["resource_name"], "gsea_helper.sh")
+        self.assertIsInstance(toolkit["price"], Decimal)
         long_body = "## 长中文正文\n\n" + "科研步骤与参数说明。" * 30000
         parsed, errors = self.load([item(lessons=[{"title": "长正文", "contentFile": "body.md"}])], {"body.md": long_body})
         self.assertFalse(errors)
         self.assertEqual(parsed[0]["lessons"][0]["content"], long_body)
+
+    def test_document_only_and_legacy_lesson_sources(self):
+        variants = [
+            {"title": "only document", "documentFile": "doc.pdf"},
+            {"title": "inline with document", "content": "正文", "documentFile": "doc.pdf"},
+            {"title": "file with document", "contentFile": "body.md", "documentFile": "body.md"},
+            {"title": "legacy inline", "content": "正文"},
+            {"title": "legacy file", "contentFile": "body.md"},
+        ]
+        parsed, errors = self.load([item(lessons=variants)], {"doc.pdf": b"%PDF-1.4\nexample", "body.md": "## 正文"})
+        self.assertFalse(errors)
+        lessons = parsed[0]["lessons"]
+        self.assertEqual([step["content"] for step in lessons], ["", "正文", "## 正文", "正文", "## 正文"])
+        self.assertEqual([step["_file"]["cache_key"] if step["_file"] else None for step in lessons],
+                         ["doc.pdf", "doc.pdf", "body.md", None, None])
+        self.assertIs(lessons[0]["_file"], lessons[1]["_file"])
+
+    def test_lesson_update_identifiers_and_clear_document_compatibility(self):
+        parsed, errors = self.load([item(lessons=[{"id": 17, "title": "更新教程", "content": "新正文",
+                                                   "clearDocument": True}])])
+        self.assertFalse(errors)
+        self.assertEqual(parsed[0]["lessons"][0]["id"], 17)
+        self.assertTrue(parsed[0]["lessons"][0]["_clear_document"])
+        self.assertIsNone(parsed[0]["lessons"][0]["_file"])
+        invalid = [
+            {"id": 0, "title": "bad", "content": "正文"},
+            {"id": True, "title": "bad", "content": "正文"},
+            {"title": "bad", "content": "正文", "clearDocument": "true"},
+            {"title": "bad", "content": "", "clearDocument": True},
+            {"title": "bad", "content": "正文", "clearDocument": True, "documentFile": "doc.md"},
+            {"title": "bad", "documentFile": "script.exe"},
+        ]
+        for lesson in invalid:
+            with self.subTest(lesson=lesson):
+                parsed, errors = self.load([item(lessons=[lesson])], {"doc.md": "正文", "script.exe": "unsafe"})
+                self.assertFalse(parsed)
+                self.assertEqual(len(errors), 1)
 
     def test_image_url_and_local_image_rules(self):
         parsed, errors = self.load([item(cover="https://example.test/image?id=1", lessons=[{"title": "x", "content": "x", "image": "http://example.test/a.png"}])])
@@ -335,6 +383,18 @@ class BatchTests(TemporaryTests):
                 batch_kit.load_batch_package(archive, self.stage)
 
 
+    def test_original_only_markdown_is_bounded_and_missing_lessons_are_distinct(self):
+        raw = item(lessons=[{"title": "chapter", "documentFile": "docs/oversized.md"}])
+        parsed, errors = self.load([raw], {"docs/oversized.md": b"x" * (validation.MAX_LESSON_BYTES + 1)})
+        self.assertFalse(parsed)
+        self.assertIn("正文超过 1MB", errors[0]["error"])
+        parsed, errors = self.load([{"title": "metadata", "description": "description"},
+                                    item(title="explicit", lessons=[])])
+        self.assertFalse(errors)
+        self.assertIsNone(parsed[0]["lessons"])
+        self.assertEqual(parsed[1]["lessons"], [])
+
+
 class CliTests(TemporaryTests):
     def test_cli_safe_join_rejects_symlinks_and_windows_ambiguity(self):
         outside = self.root / "outside"
@@ -361,10 +421,17 @@ class CliTests(TemporaryTests):
         self.assertTrue(cli.validate(work))
         self.assertTrue(cli.pack(work, output))
         with zipfile.ZipFile(output) as archive:
-            self.assertEqual(set(archive.namelist()), {"toolkits.json", "covers/demo-cover.svg", "resources/gsea_helper.sh", "lessons/01-prepare.md"})
+            self.assertEqual(set(archive.namelist()), {
+                "toolkits.json", "covers/demo-cover.svg", "resources/gsea_helper.sh",
+                "resources/demo-genes.gmt", "lessons/01-prepare.md", "lessons/gsea-flow.svg",
+            })
+            self.assertNotIn("README.txt", archive.namelist())
             parsed, errors = batch_kit.load_batch_package(archive, self.stage)
         self.assertFalse(errors)
         self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["lessons"][0]["_file"]["cache_key"], "lessons/01-prepare.md")
+        self.assertEqual(parsed[0]["lessons"][0]["image_file"]["cache_key"], "lessons/gsea-flow.svg")
+        self.assertEqual(len(parsed[0]["resource_files"]), 2)
         before = output.read_bytes()
         self.assertFalse(cli.pack(work, output))
         self.assertEqual(output.read_bytes(), before)
@@ -397,6 +464,18 @@ class CliTests(TemporaryTests):
         (work / "linked.md").symlink_to(target)
         (work / "toolkits.json").write_text(json.dumps([item(lessons=[{"title": "x", "contentFile": "linked.md"}])]), encoding="utf-8")
         self.assertFalse(cli.validate(work))
+
+    def test_cli_rejects_oversized_markdown_original(self):
+        work = self.root / "work"
+        work.mkdir()
+        (work / "large.md").write_bytes(b"x" * (validation.MAX_LESSON_BYTES + 1))
+        manifest = item(lessons=[{"title": "chapter", "documentFile": "large.md"}])
+        (work / "toolkits.json").write_text(json.dumps([manifest]), encoding="utf-8")
+        self.assertFalse(cli.validate(work))
+        output = work / "output.zip"
+        self.assertFalse(cli.pack(work, output))
+        self.assertFalse(output.exists())
+        self.assertEqual(validation.MAX_ZIP_COMPRESSED, 100 * 1024 * 1024 - 64 * 1024)
 
     def test_cli_output_failure_is_atomic_and_leaves_no_temp(self):
         work = self.root / "work"
@@ -466,6 +545,21 @@ class CliTests(TemporaryTests):
         scripts = external / "scripts"
         scripts.mkdir()
         with zipfile.ZipFile(batch_kit.build_skill_zip()) as archive:
+            self.assertEqual(set(archive.namelist()), {
+                "zhihe-toolkit-converter/SKILL.md", "zhihe-toolkit-converter/references/format.md",
+                "zhihe-toolkit-converter/scripts/build_batch.py",
+                "zhihe-toolkit-converter/scripts/validation.py",
+                "zhihe-toolkit-converter/toolkits.template.json",
+            })
+            self.assertEqual(json.loads(archive.read("zhihe-toolkit-converter/toolkits.template.json")),
+                             [batch_kit.SAMPLE_ITEM])
+            self.assertIn(b"documentFile", archive.read("zhihe-toolkit-converter/references/format.md"))
+            self.assertIn(b"documentFile", archive.read("zhihe-toolkit-converter/SKILL.md"))
+            for name in ["SKILL.md", "references/format.md"]:
+                guide = archive.read("zhihe-toolkit-converter/" + name).decode("utf-8")
+                self.assertIn("可能允许匿名下载", guide)
+                self.assertNotIn("preview不开放原件", guide)
+            self.assertIn("可能允许匿名下载", batch_kit.PROMPT_TEXT)
             for name in ["build_batch.py", "validation.py"]:
                 (scripts / name).write_bytes(archive.read("zhihe-toolkit-converter/scripts/" + name))
         script = scripts / "build_batch.py"
@@ -475,12 +569,31 @@ class CliTests(TemporaryTests):
         for arguments in [["init", str(work)], ["validate", str(work)], ["pack", str(work), str(output)]]:
             result = subprocess.run([sys.executable, "-S", str(script), *arguments], cwd=external, env=env, capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((work / "toolkits.json").read_text(encoding="utf-8")),
+                         [batch_kit.SAMPLE_ITEM])
+        for name, content in batch_kit.DEMO_FILES.items():
+            self.assertEqual((work / name).read_text(encoding="utf-8"), content)
         result = subprocess.run([sys.executable, "-S", str(script), "pack", str(work), str(output)], cwd=external, env=env, capture_output=True, text=True, timeout=20)
         self.assertNotEqual(result.returncode, 0)
         with zipfile.ZipFile(output) as archive:
+            self.assertNotIn("README.txt", archive.namelist())
             parsed, errors = batch_kit.load_batch_package(archive, self.stage)
         self.assertFalse(errors)
         self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["lessons"][0]["_file"]["cache_key"], "lessons/01-prepare.md")
+        manifest = json.loads((work / "toolkits.json").read_text(encoding="utf-8"))
+        del manifest[0]["lessons"][0]["contentFile"]
+        (work / "toolkits.json").write_text(json.dumps(manifest), encoding="utf-8")
+        only_original = external / "only-original.zip"
+        for arguments in [["validate", str(work)], ["pack", str(work), str(only_original)]]:
+            result = subprocess.run([sys.executable, "-S", str(script), *arguments], cwd=external, env=env,
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with zipfile.ZipFile(only_original) as archive:
+            parsed, errors = batch_kit.load_batch_package(archive, self.stage)
+        self.assertFalse(errors)
+        self.assertEqual(parsed[0]["lessons"][0]["content"], "")
+        self.assertEqual(parsed[0]["lessons"][0]["_file"]["cache_key"], "lessons/01-prepare.md")
 
 
 if __name__ == "__main__":

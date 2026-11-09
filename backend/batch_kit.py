@@ -28,8 +28,11 @@ SAMPLE_ITEM = {
     "description": "本工具包将 GSEA 分析拆解为可复现的操作步骤，包含示例基因集、参数说明与绘图脚本。",
     "category": "生信分析", "level": "入门", "price": 0, "tags": "GSEA,富集分析,绘图",
     "cover": "covers/demo-cover.svg", "resource": "resources/gsea_helper.sh",
+    "resources": ["resources/demo-genes.gmt"],
     "lessons": [
-        {"title": "环境准备与示例数据", "contentFile": "lessons/01-prepare.md", "duration": 8, "preview": True},
+        {"title": "环境准备与示例数据", "contentFile": "lessons/01-prepare.md",
+         "documentFile": "lessons/01-prepare.md", "image": "lessons/gsea-flow.svg",
+         "duration": 8, "preview": True},
         {"title": "运行 GSEA 并解读结果", "content": "## 运行 GSEA\n\n加载基因集与表达矩阵，按推荐参数运行，重点关注 NES 与 FDR q-value。\n\n### 操作要点\n\n1. 检查基因集格式（gmt）\n2. 固定随机种子保证可复现\n3. 导出 leading edge 基因用于后续绘图", "duration": 12},
     ],
 }
@@ -44,13 +47,21 @@ DEMO_RESOURCE_SH = """#!/usr/bin/env bash
 # 示例配套资源：仅作为附件提供，平台和转换器不会执行它。
 echo "zhihe demo resource"
 """
+DEMO_RESOURCE_GMT = """DEMO_GSEA_SET	Example gene set (replace with your validated data)	TP53	EGFR	MAPK1
+"""
+DEMO_LESSON_IMAGE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" width="800" height="180" viewBox="0 0 800 180">
+  <rect width="800" height="180" fill="#0a1f1a"/>
+  <text x="40" y="80" font-family="sans-serif" font-size="26" fill="#b9f36a">表达矩阵 + 基因集 → GSEA</text>
+  <text x="40" y="130" font-family="sans-serif" font-size="20" fill="#ffffff">示例步骤配图 · 请替换为实际分析图</text>
+</svg>
+"""
 DEMO_LESSON_MD = """## 环境准备与示例数据
 
 1. 安装 GSEA 桌面版或 `clusterProfiler`（R）。
 2. 准备表达矩阵（gene_symbol × sample）与 gmt 基因集。
 3. 检查注释一致性，剔除 NA 值。
 
-> 提示：本文件（lessons/01-prepare.md）会作为第一步的试看内容展示给学习者。
+> 提示：本文件（lessons/01-prepare.md）作为第一步的试看正文；同路径的原始教学文档遵循该教程的学习权限；免费或试看步骤可能允许匿名下载，勿放入敏感资料。
 """
 
 README_TXT = """知核 · 工具包批量上传标准格式
@@ -59,7 +70,11 @@ README_TXT = """知核 · 工具包批量上传标准格式
   toolkits.json  必需：UTF-8 JSON 非空数组；也兼容 {"toolkits": [...]} 对象
   covers/       可选：封面图片
   resources/    可选：配套资源（附件，不执行脚本）
-  lessons/      可选：UTF-8 Markdown 正文与配图
+  lessons/      可选：正文、原始教学文档与教程配图
+
+模板示例：第一节的 contentFile 与 documentFile 均引用 lessons/01-prepare.md。
+前者提供 Markdown 正文，后者保留同一文件作为原始教学文档；文件只入包一次。
+此外还演示了 cover、image、resource 与 resources 附件。按需替换示例内容。
 
 每个工具包：
   title        必填字符串，1～120 字
@@ -73,10 +88,19 @@ README_TXT = """知核 · 工具包批量上传标准格式
   resource     选填字符串，只能是 ZIP 内相对文件路径，禁止 HTTP URL
   resources    选填数组（≤20项），每项同 resource；与 resource 合并去重，
                resource 排最前；单个工具包附件总数（含resource）≤20
-  lessons      选填数组，默认[]，最多50项；每项必须是对象：
+  lessons      选填数组，最多50项；新建省略默认为[]，更新省略保留旧步骤；显式[]可清空草稿，上架不可清空。每项必须是对象：
     title        必填字符串，1～160 字
-    content      与contentFile必须且只能提供一个，非空Markdown字符串，UTF-8≤1MB
-    contentFile  与content必须且只能提供一个，ZIP内UTF-8文件相对路径，≤1MB
+    id           选填正整数；更新时需属于目标工具包。重排教程应填写原id，
+                 否则更新按位置匹配，可能把原件/图片关联到错误步骤
+    content      选填 Markdown 字符串，UTF-8≤1MB；仅配合documentFile时可为空；
+                 不得与contentFile并用
+    contentFile  选填 ZIP 内 UTF-8 正文文件相对路径，≤1MB；不得与content并用
+    documentFile 选填 ZIP 内原始教学文档相对路径，支持
+                 .md/.markdown/.txt/.docx/.pdf/.html/.htm/.rtf/.pptx
+                 可以单独提供，也可与 content 或 contentFile 搭配；Markdown类原件≤1MB；
+                 无 documentFile 时必须提供 content 或 contentFile
+    clearDocument 选填JSON布尔值；true仅用于更新已匹配教程的原件移除，
+                 须提供新的非空content或contentFile，且不得同填documentFile
     duration     选填整数，1～600分钟，默认10；不接受字符串/小数/bool
     image        选填字符串，相对图片路径或http(s)图片URL
     preview      选填JSON布尔true/false；仅真正省略时默认第一节true、其余false
@@ -88,50 +112,74 @@ README_TXT = """知核 · 工具包批量上传标准格式
   - 图片文件扩展名jpg/jpeg/png/webp/gif/svg；图片实际格式/安全性由服务端再验证
   - 资源拒绝exe/bat/cmd/com/scr/vbs/jse/wsf/ps1/dll/msi/hta等危险类型
   - 清单独立上限2MB；解析后文本累计20MB（重复contentFile按规范路径仅计一次）
-  - ZIP压缩体≤100MB、实际解压总量≤300MB、每成员≤40MB、含目录成员最多2000
-  - 正文单节≤1MB；文件路径≤500字，每段文件名≤200字
-  - 禁止绝对路径、..路径段、反斜杠、Windows盘符/冒号、符号链接、重复规范化成员名
+  - ZIP压缩体≤100MiB-64KiB（为100MiB请求预留表单空间）、解压≤300MB、单成员≤40MB、成员≤2000
+  - 正文和Markdown类原件单节≤1MB；转换后预览单节≤4MB、每工具包累计≤20MB（服务端检查）
+  - 文件路径≤500字，每段文件名≤200字；禁止绝对路径、..路径段、反斜杠、
+    Windows盘符/冒号、符号链接、重复规范化成员名
   - 不接受损坏成员；即使未被清单引用也检查ZIP成员。平台不执行附件
-  - 与本人已发布工具包同名的条目会被跳过；查看逐条失败/创建报告
+  - 教程原件遵循该教程的学习权限：已发布的免费教程/付费试看可能允许匿名下载，
+    付费锁定教程须通过购买等权益检查；请勿将敏感原件放入试看步骤。
+    配套资源附件另须登录并满足附件下载权限，平台不会执行附件
+  - mode=skip 按同一作者+标题跳过已有工具包（含草稿）；mode=update 更新同名工具包
+    但保留其现有发布状态；mode=create 不去重。publish 仅决定新建条目的发布/草稿状态。
+    更新时已有教程按id（如提供）或位置匹配，未传documentFile会保留匹配教程的原件；
+    保留非Markdown原件时不可只改正文，须替换原件或用clearDocument:true与非空正文移除旧原件；重排请填写原教程id。
+    上传后查看逐条 created/updated/skipped/failed 报告；本地 validate 无法预知这些结果
 
 本地转换（仅Python标准库，validation.py必须和build_batch.py放在同一scripts目录）：
   python3 scripts/build_batch.py init 工作目录
   python3 scripts/build_batch.py validate 工作目录
   python3 scripts/build_batch.py pack 工作目录 zhihe-batch.zip
   已有模板或输出文件默认拒绝覆盖；仅明确确认后加 --force 覆盖
-  pack仅包含toolkits.json与显式引用文件；不会扫描/夹带.env、notes或未引用资料
-  输出ZIP不得被清单显式引用；输出在同目录临时写入，再原子安装
+  pack仅包含toolkits.json与显式引用文件（含documentFile）；不会扫描/夹带.env、
+  README.txt、notes或未引用资料。输出ZIP不得被清单显式引用；输出在同目录
+  临时写入，再原子安装。
+  validate做本地结构、路径、引用文件存在/大小及UTF-8正文检查，不能代替服务端
+  的ZIP完整性、图片和文档实际内容/格式验证、转换、配额、权限及发布结果检查。
 上传：知核 → 我的 → 我的工具包 → 批量上传。下载转换器不等于安装或执行Skill。
 """
 
+DEMO_FILES = {
+    "covers/demo-cover.svg": DEMO_COVER_SVG,
+    "resources/gsea_helper.sh": DEMO_RESOURCE_SH,
+    "resources/demo-genes.gmt": DEMO_RESOURCE_GMT,
+    "lessons/01-prepare.md": DEMO_LESSON_MD,
+    "lessons/gsea-flow.svg": DEMO_LESSON_IMAGE_SVG,
+    "README.txt": README_TXT,
+}
+
 PROMPT_TEXT = f"""请把用户明确指定的本地科研教程资料整理为知核批量上传ZIP。保留真实命令与说明，不编造内容、不执行附件、不读取未指定的秘密文件。
-每个主题生成工具包及教程步骤；toolkits.json为UTF-8非空数组，最多50项、每项最多50节。
+每个主题生成工具包及教程步骤；toolkits.json为UTF-8非空数组，最多50项、每项最多50节；新建省略lessons视为[]，更新省略保留旧步骤，显式[]只能清空草稿。模板第一节同时引用同一个Markdown的contentFile与documentFile，并含封面、配图、两项附件；请按用户实际资料替换示例。
 title必填≤120字，description必填≤20000字，summary≤500字，tags字符串/字符串数组合并≤300字；category仅{' / '.join(CATEGORIES)}，level仅{' / '.join(LEVELS)}；price有限0～9999，禁止NaN/Infinity/bool。
-每节title必填≤160字，content/contentFile必须且只能提供一个，非空UTF-8正文≤1MB；duration整数1～600；preview只能JSON true/false，第一节省略才默认true，显式false必须保留。
-cover/image可相对图片路径或http(s)图片URL；resource/contentFile只能相对文件路径，禁止HTTP URL、绝对路径、..、反斜杠、盘符/冒号及symlink。图片仅jpg/jpeg/png/webp/gif/svg，资源禁止exe/bat/ps1/dll等危险类型；不写featured。
-清单≤2MB，累计解析文本≤20MB（重复正文路径仅计一次），每文件≤40MB，ZIP压缩体≤100MB、解压总量≤300MB、成员≤2000，路径≤500字/每段文件名≤200字。长中文正文使用contentFile。
-使用python3 scripts/build_batch.py init <工作目录>起步，再validate <工作目录>，通过后pack <工作目录> <输出.zip>。工具只打包清单显式引用文件，不扫描资料目录；未引用.env/notes不进入ZIP，禁止输出自引用。已有模板/输出默认拒绝覆盖，必须用户明确确认后才加--force。
-完成后提醒用户在知核「我的 → 我的工具包 → 批量上传」上传并查看逐条报告。转换器只依赖标准库，其validation.py与build_batch.py必须保持同目录。"""
+每节title必填≤160字；正文content/contentFile只能选一个，且无documentFile时必须选其一，UTF-8正文≤1MB（仅有documentFile时content可留空）。documentFile为可单独使用、也可搭配正文的ZIP内原始文档路径（Markdown类≤1MB），支持.md/.markdown/.txt/.docx/.pdf/.html/.htm/.rtf/.pptx；duration整数1～600；preview只能JSON true/false，第一节省略才默认true，显式false必须保留。更新重排教程时提供目标工具包内原教程的正整数id；不提供则按位置匹配，会错误继承其他步骤的原件/图片。更新未传documentFile会保留匹配教程的原件；保留非Markdown原件时不可只改正文，须替换原件或清除；要删除原件，提供clearDocument:true与新的非空content/contentFile，不得同时传documentFile。
+cover/image可相对图片路径或http(s)图片URL；resource/resources/contentFile/documentFile只能相对文件路径，禁止HTTP URL、绝对路径、..、反斜杠、盘符/冒号及symlink。图片仅jpg/jpeg/png/webp/gif/svg，附件最多20项且禁止exe/bat/ps1/dll等危险类型；不写featured。
+清单≤2MB，累计解析文本≤20MB（重复正文路径仅计一次），每文件≤40MB，ZIP压缩体≤100MiB-64KiB（预留表单空间）、解压总量≤300MB、成员≤2000，路径≤500字/每段文件名≤200字；原件另受服务端格式/内容/大小检查，转换后HTML每节≤4MB、每工具包累计≤20MB。长中文正文使用contentFile。
+使用python3 scripts/build_batch.py init <工作目录>起步，再validate <工作目录>，通过后pack <工作目录> <输出.zip>。工具只打包清单显式引用文件（含原件），不扫描资料目录；未引用.env/README.txt/notes不进入ZIP，禁止输出自引用。已有模板/输出默认拒绝覆盖，必须用户明确确认后才加--force。
+本地validate只检查结构、路径和引用文件存在/大小及UTF-8正文，不能替代服务端ZIP完整性、图片/文档实际格式/安全性/转换、配额及权限验证。教程原件按该教程学习权限检查（已发布的免费/付费试看步骤可能允许匿名下载）；附件下载仍需登录及相应权益。请勿将敏感原件放在试看步骤。
+上传时mode=skip跳过同作者+同名已有条目（含草稿），mode=update更新同名工具包但保留其原发布状态，mode=create不去重；publish仅决定新建工具包是否发布。完成后提醒用户在知核「我的 → 我的工具包 → 批量上传」上传并查看逐条created/updated/skipped/failed报告。转换器只依赖标准库，其validation.py与build_batch.py必须保持同目录。"""
 
 SKILL_MD = f"""---
 name: zhihe-toolkit-converter
 description: 将用户指定的科研教程资料整理成知核批量上传toolkits.json，并用标准库工具校验和打包。
 ---
 # 知核工具包转换器
-1. 仅阅读用户指定的资料，按主题生成工具包。规则详见 references/format.md。
+1. 仅阅读用户指定的资料，按主题生成工具包。规则详见 references/format.md；参考 toolkits.template.json 后先运行 init 生成其引用文件。
 2. `python3 scripts/build_batch.py init <工作目录>` 生成模板，再编辑toolkits.json及引用文件。
 3. `python3 scripts/build_batch.py validate <工作目录>`；失败先修正，不能跳过校验。
-4. `python3 scripts/build_batch.py pack <工作目录> <输出.zip>`；仅清单与显式引用文件入包。
-5. 提示在知核 → 我的 → 我的工具包 → 批量上传，查看逐条结果。
+4. `python3 scripts/build_batch.py pack <工作目录> <输出.zip>`；仅清单与显式引用文件（含原件）入包。
+5. 提示在知核 → 我的 → 我的工具包 → 批量上传，查看逐条 created/updated/skipped/failed 结果。
 
-硬约束：最多50工具包/每包50节；title≤120、description≤20000、summary≤500、lesson.title≤160字。
+硬约束：最多50工具包/每包50节、最多20项附件；新建省略lessons视为[]，更新省略保留旧步骤，显式[]只可清空草稿；title≤120、description≤20000、summary≤500、lesson.title≤160字。
 category只能{' / '.join(CATEGORIES)}；level只能{' / '.join(LEVELS)}；price有限0～9999。
-正文content/contentFile必须且只能有一个且≤1MB；duration整数1～600；preview只能JSON true/false，第一节仅省略默认true，显式false保留。
-cover/image可http(s)图片URL或相对路径；resource/contentFile禁止URL；禁止symlink、..、绝对路径、反斜杠、盘符/冒号。图片仅jpg/jpeg/png/webp/gif/svg；资源拒绝exe/bat/ps1/dll等。
-清单≤2MB、解析文本累计≤20MB（重复正文只计一次）、每文件≤40MB、ZIP压缩≤100MB/解压≤300MB/成员≤2000，路径≤500字/每段文件名≤200字。长中文正文用contentFile。
-不要扫描未指定目录/读取秘密/执行附件，不把未引用.env/notes打包，不显式引用输出ZIP。
+正文content/contentFile只能二选一且≤1MB；无documentFile时须有非空正文，搭配documentFile时content可留空。documentFile是可独立或搭配正文的原始文档相对路径（Markdown类≤1MB），支持.md/.markdown/.txt/.docx/.pdf/.html/.htm/.rtf/.pptx。模板同一个.md同时用作contentFile和documentFile，只入包一次。更新已有教程可传目标工具包内的正整数id；未传按位置匹配，重排必须用原id以免把原件/图片关联错。更新未传documentFile保留匹配教程的原件；保留非Markdown原件时不可只改正文，须替换或清除；要移除须传clearDocument:true与新的非空content/contentFile，不得同时传documentFile。
+duration整数1～600；preview只能JSON true/false，第一节仅省略默认true，显式false保留。
+cover/image可http(s)图片URL或相对路径；resource/resources/contentFile/documentFile禁止URL；禁止symlink、..、绝对路径、反斜杠、盘符/冒号。图片仅jpg/jpeg/png/webp/gif/svg；资源拒绝exe/bat/ps1/dll等。
+清单≤2MB、解析文本累计≤20MB（重复正文只计一次）、每文件≤40MB、ZIP压缩≤100MiB-64KiB（预留表单空间）/解压≤300MB/成员≤2000，路径≤500字/每段文件名≤200字。长中文正文用contentFile；原件需再过服务端内容/格式/大小检查，转换后HTML每节≤4MB、每工具包累计≤20MB。
+不要扫描未指定目录/读取秘密/执行附件，不把未引用.env/README.txt/notes打包，不显式引用输出ZIP。
 已有模板或输出默认不覆盖；取得用户明确确认后可加--force。输出同目录临时写入再原子安装。
-scripts/validation.py是共享标准库模块，必须与build_batch.py保持同目录。推荐位仅管理员设置，不写featured。
+本地validate验证结构、路径及引用文件存在/大小和UTF-8正文，不能代替服务端ZIP完整性、图片/文档实际格式/转换、配额及权限检查。教程原件遵循教程学习权限（已发布的免费/付费试看步骤可能允许匿名下载）；资源附件下载仍需登录及相应权益。请勿将敏感原件放在试看步骤。
+上传时mode=skip按同作者+同名跳过（含草稿）；mode=update更新同名并保留已有发布状态；mode=create不去重；publish仅作用于新建条目。需查看逐条处理结果。
+scripts/validation.py是共享标准库模块，必须与build_batch.py保持同目录。推荐位仅管理员设置，不写featured。下载Skill不等于安装或执行它。
 """
 
 
@@ -143,10 +191,8 @@ def build_template_zip():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(MANIFEST_NAME, _clean_manifest())
-        archive.writestr("covers/demo-cover.svg", DEMO_COVER_SVG)
-        archive.writestr("resources/gsea_helper.sh", DEMO_RESOURCE_SH)
-        archive.writestr("lessons/01-prepare.md", DEMO_LESSON_MD)
-        archive.writestr("README.txt", README_TXT)
+        for name, content in DEMO_FILES.items():
+            archive.writestr(name, content)
     buf.seek(0)
     return buf
 
@@ -154,10 +200,7 @@ def build_template_zip():
 # Keep SCRIPT_PY as the download entry point without duplicating CLI validation.
 SCRIPT_PY = ("#!/usr/bin/env python3\n"
              + "TEMPLATE = " + repr(_clean_manifest().decode("utf-8")) + "\n"
-             + "DEMO_FILES = " + repr({"covers/demo-cover.svg": DEMO_COVER_SVG,
-                                       "resources/gsea_helper.sh": DEMO_RESOURCE_SH,
-                                       "lessons/01-prepare.md": DEMO_LESSON_MD,
-                                       "README.txt": README_TXT}) + "\n"
+             + "DEMO_FILES = " + repr(DEMO_FILES) + "\n"
              + Path(__file__).with_name("batch_publish_cli.py").read_text(encoding="utf-8"))
 
 
@@ -202,7 +245,7 @@ def _archive_size(archive):
 
 def _member_index(archive):
     if _archive_size(archive) > MAX_ZIP_COMPRESSED:
-        raise ManifestError("压缩包超过 100MB")
+        raise ManifestError("压缩包超过上传上限（100MB 请求须预留 64KB 表单空间）")
     members = archive.infolist()
     if len(members) > MAX_ZIP_MEMBERS:
         raise ManifestError(f"压缩包成员过多（上限 {MAX_ZIP_MEMBERS} 个，含目录）")
@@ -230,7 +273,7 @@ def _member_index(archive):
         total += info.file_size
         compressed += info.compress_size
         if total > MAX_ZIP_UNCOMPRESSED or compressed > MAX_ZIP_COMPRESSED:
-            raise ManifestError("压缩包解压总量超过 300MB 或压缩体超过 100MB")
+            raise ManifestError("压缩包解压总量超过 300MB 或压缩体超过上传上限")
         index[name] = info
     return index
 

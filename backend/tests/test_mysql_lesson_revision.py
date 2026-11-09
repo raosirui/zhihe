@@ -38,7 +38,9 @@ def test_completion_rechecks_current_lesson_after_toolkit_lock(mysql_app, mysql_
     worker.start()
     try:
         assert read_window.wait(5), "Completion did not establish its pre-lock read snapshot"
-        lessons = [] if change == "delete" else [{
+        lessons = [{"id": mysql_data["lessons"]["paidLocked"],
+                    "title": "Paid locked", "content": "Remaining private step",
+                    "duration": 5, "preview": False}] if change == "delete" else [{
             "id": lesson_id, "title": "Paid preview", "content": "Preview withdrawn after the read",
             "duration": 5, "preview": False, "image": f"/api/lesson-asset/{mysql_data['assets']['preview']}"
         }]

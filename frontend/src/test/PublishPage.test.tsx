@@ -1,5 +1,5 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { PublishPage } from '../pages/PublishPage'
 import { setToken } from '../lib'
 import { json, mockFetch, renderPage } from './helpers'
@@ -72,6 +72,103 @@ describe('single-toolkit publishing form', () => {
     expect(documentPicker).toHaveAttribute('accept', expect.stringContaining('.markdown'))
     expect(documentPicker).toHaveAttribute('accept', expect.stringContaining('.txt'))
     expect(screen.queryByText('导入 Markdown/TXT')).not.toBeInTheDocument()
+  })
+
+  it('uploads cover and lesson images by zero-based index, with file taking precedence over preserved URLs', async () => {
+    setToken('publisher-session')
+    const create = vi.fn(() => 'blob:image'), revoke = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }))
+    const { calls } = mockFetch(({ path, options }) => path === '/toolkits' && options.method === 'POST' ? json({ id: 77 }) : undefined)
+    const result = renderPage(<PublishPage />)
+    await screen.findByLabelText(/工具包名称/)
+    fillRequiredFields()
+    fireEvent.change(screen.getByLabelText(/步骤正文/), { target: { value: '可复现步骤' } })
+    fireEvent.change(screen.getByLabelText('封面图片 URL（选填）'), { target: { value: 'https://example.org/old-cover.jpg' } })
+    fireEvent.change(screen.getByLabelText('本步骤配图 URL（选填）'), { target: { value: 'https://example.org/old-step.jpg' } })
+    const cover = new File(['cover'], 'cover.png', { type: 'image/png' })
+    const image = new File(['step'], 'step.jpg', { type: 'image/jpeg' })
+    fireEvent.change(screen.getByLabelText('或上传封面图片（选填）'), { target: { files: [cover] } })
+    fireEvent.change(screen.getByLabelText('或上传本步骤配图（选填）'), { target: { files: [image] } })
+    expect(screen.getByLabelText('封面图片 URL（选填）')).toBeDisabled()
+    expect(screen.getByLabelText('本步骤配图 URL（选填）')).toBeDisabled()
+    expect(await screen.findByRole('img', { name: '封面缩略图' })).toHaveAttribute('src', 'blob:image')
+    expect(screen.getByRole('img', { name: '第 1 步配图缩略图' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '移除封面文件' }))
+    expect(screen.getByLabelText('封面图片 URL（选填）')).toHaveValue('https://example.org/old-cover.jpg')
+    expect(screen.getByLabelText('封面图片 URL（选填）')).toBeEnabled()
+    fireEvent.change(screen.getByLabelText('或上传封面图片（选填）'), { target: { files: [cover] } })
+    fireEvent.click(screen.getByRole('button', { name: '发布工具包' }))
+    await waitFor(() => expect(calls.some(call => call.path === '/toolkits' && call.options.method === 'POST')).toBe(true))
+    const data = calls.find(call => call.path === '/toolkits' && call.options.method === 'POST')!.options.body as FormData
+    expect(data.get('cover')).toBe('')
+    expect((data.get('cover_file') as File).name).toBe('cover.png')
+    expect((data.get('lesson_image_0') as File).name).toBe('step.jpg')
+    expect(JSON.parse(String(data.get('lessons')))[0].image).toBe('')
+    result.unmount()
+    expect(revoke).toHaveBeenCalledWith('blob:image')
+  })
+
+  it('counts images with documents and resources toward upload caps without losing accepted files', async () => {
+    setToken('publisher-session')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:image'), revokeObjectURL: vi.fn() }))
+    mockFetch(() => undefined)
+    renderPage(<PublishPage />)
+    await screen.findByLabelText(/工具包名称/)
+    const sized = (name: string, mb: number, type = '') => {
+      const file = new File(['small'], name, { type })
+      Object.defineProperty(file, 'size', { value: mb * 1024 * 1024 })
+      return file
+    }
+    fireEvent.change(screen.getByLabelText('或上传封面图片（选填）'), { target: { files: [sized('cover.png', 39, 'image/png')] } })
+    fireEvent.change(screen.getByLabelText('或上传本步骤配图（选填）'), { target: { files: [sized('step.jpg', 39, 'image/jpeg')] } })
+    fireEvent.change(screen.getByLabelText(/点击选择资源文件/), { target: { files: [sized('data.zip', 23)] } })
+    expect(screen.getByRole('alert')).toHaveTextContent('不能超过 100 MB')
+    expect(screen.getByText('点击选择资源文件（可多选）')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: '封面缩略图' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('或上传本步骤配图（选填）'), { target: { files: [sized('too-large.png', 41, 'image/png')] } })
+    expect(screen.getAllByRole('alert').some(alert => alert.textContent?.includes('too-large.png 超过单个文件 40 MB'))).toBe(true)
+    expect(screen.getByText('已选择：step.jpg')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('或上传封面图片（选填）'), { target: { files: [new File(['svg'], 'image.svg', { type: 'image/svg+xml' })] } })
+    expect(screen.getAllByRole('alert').some(alert => alert.textContent?.includes('不支持 SVG'))).toBe(true)
+  })
+
+  it('previews selected HTML/text files only as inert text and clears image URLs on logout', async () => {
+    setToken('publisher-session')
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:local-cover'), revokeObjectURL: revoke }))
+    mockFetch(({ path }) => path === '/auth/logout' ? json({ ok: true }) : undefined)
+    const result = renderPage(<PublishPage />, '/', '/', undefined, true)
+    await screen.findByLabelText(/工具包名称/)
+    fireEvent.change(screen.getByLabelText('或上传封面图片（选填）'), { target: { files: [new File(['image'], 'cover.png', { type: 'image/png' })] } })
+    fireEvent.change(screen.getByLabelText(/点击选择资源文件/), { target: {
+      files: [new File(['<script>alert(1)</script><h1>plain</h1>'], 'sample.html', { type: 'text/html' })],
+    } })
+    fireEvent.click(screen.getByText('预览资源：sample.html'))
+    expect(await screen.findByText(/<script>alert\(1\)<\/script>/)).toBeInTheDocument()
+    expect(result.container.querySelector('script')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Logout session' }))
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith('blob:local-cover'))
+    expect(screen.queryByText('sample.html')).not.toBeInTheDocument()
+  })
+
+  it('reindexes an uploaded lesson image when an earlier lesson is removed', async () => {
+    setToken('publisher-session')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:image'), revokeObjectURL: vi.fn() }))
+    const { calls } = mockFetch(({ path, options }) => path === '/toolkits' && options.method === 'POST' ? json({ id: 78 }) : undefined)
+    renderPage(<PublishPage />)
+    await screen.findByLabelText(/工具包名称/)
+    fillRequiredFields()
+    fireEvent.click(screen.getByRole('button', { name: '添加步骤' }))
+    fireEvent.change(screen.getAllByLabelText(/步骤标题/)[1], { target: { value: '后一个步骤' } })
+    fireEvent.change(screen.getAllByLabelText(/步骤正文/)[1], { target: { value: '正文' } })
+    fireEvent.change(screen.getAllByLabelText('或上传本步骤配图（选填）')[1], { target: { files: [new File(['x'], 'step.png', { type: 'image/png' })] } })
+    fireEvent.click(screen.getByRole('button', { name: '删除步骤 1' }))
+    fireEvent.click(screen.getByRole('button', { name: '发布工具包' }))
+    await waitFor(() => expect(calls.some(call => call.path === '/toolkits' && call.options.method === 'POST')).toBe(true))
+    const data = calls.find(call => call.path === '/toolkits' && call.options.method === 'POST')!.options.body as FormData
+    expect((data.get('lesson_image_0') as File).name).toBe('step.png')
+    expect(data.get('lesson_image_1')).toBeNull()
+    expect(JSON.parse(String(data.get('lessons')))[0]).toMatchObject({ title: '后一个步骤', preview: true })
   })
 
   it('rejects excess resources without truncating or replacing already-selected files', async () => {

@@ -46,11 +46,7 @@ def batch_upload():
         raise APIError("批量模式无效")
     publish = request.form.get("publish", "1").lower() not in {"0", "false", "no", "off"}
     job_id, path, size = batch_worker.stage_package(file.stream, current_app.config["MAX_CONTENT_LENGTH"])
-    try:
-        batch_worker.enqueue(identity, mode, publish, job_id, path, size)
-    except Exception:
-        batch_worker._safe_unlink(path)
-        raise
+    batch_worker.enqueue(identity, mode, publish, job_id, path, size)
     return jsonify({"jobId": job_id, "status": "queued", "mode": mode, "publish": publish,
                     "message": "已开始后台处理，可离开页面"}), 202
 

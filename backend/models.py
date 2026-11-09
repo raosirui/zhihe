@@ -130,7 +130,8 @@ class Lesson(db.Model):
                 "content": self.content if can_view else None, "image": image}
         if can_view:
             data["convertedHtml"] = self.converted_html
-            if self.raw_file_path:
+            if self.raw_file_path or any(ref.usage == "lesson_raw" and ref.lesson_id == self.id
+                                         for ref in self.toolkit.file_references):
                 data["rawFileUrl"] = f"/api/lesson-raw/{self.id}"
         return data
 
@@ -245,6 +246,8 @@ class FileAsset(db.Model):
     purpose = db.Column(db.String(16), nullable=False)
     size = db.Column(db.BigInteger, nullable=False)
     sha256 = db.Column(db.String(64), nullable=True)
+    storage_backend = db.Column(db.String(16), nullable=True)  # NULL means legacy local
+    object_key = db.Column(db.String(64), nullable=True)
     state = db.Column(db.String(24), nullable=False, default="staging")
     is_public = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, default=utcnow)
@@ -304,6 +307,8 @@ class BatchJob(db.Model):
     failed = db.Column(db.Integer, nullable=False, default=0)
     results_json = db.Column(db.Text, nullable=False, default="[]")
     package_path = db.Column(db.String(500))    # staged ZIP kept until the worker consumes it
+    package_object_key = db.Column(db.String(160))  # private object until terminal job state
+    package_sha256 = db.Column(db.String(64))
     package_size = db.Column(db.BigInteger, nullable=False, default=0)
     error = db.Column(db.String(300))
     created_at = db.Column(db.DateTime, default=utcnow)

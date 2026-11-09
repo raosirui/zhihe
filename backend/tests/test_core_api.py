@@ -320,6 +320,76 @@ def test_offline_paid_access_and_unpaid_recheck(env):
     assert client.post(f"/api/orders/{pending}/cancel", headers=headers["buyer"]).status_code == 200
 
 
+@pytest.mark.parametrize("legacy_cover", [False, True])
+def test_cover_visibility_for_published_offline_and_draft(env, legacy_cover):
+    app, client, _, headers, _ = env
+    image = png_bytes()
+    response = client.post("/api/toolkits", data={
+        "title": "Covered paid toolkit", "description": "description", "price": "10",
+        "lessons": json.dumps([{"title": "intro", "content": "body"}]),
+        "cover_file": (io.BytesIO(image), "cover.png"),
+    }, headers=headers["seller"])
+    assert response.status_code == 201, response.json
+    toolkit = response.json
+    cover = toolkit["cover"]
+    with app.app_context():
+        asset = FileAsset.query.filter_by(stored_name=cover.rsplit("/", 1)[-1]).one()
+        assert asset.is_public
+        asset_id = asset.id
+        ref = FileReference.query.filter_by(asset_id=asset_id, toolkit_id=toolkit["id"], usage="cover").one()
+        if legacy_cover:
+            db.session.delete(ref)  # Historical toolkit.cover without a registry reference.
+            db.session.commit()
+
+    for auth in ({}, headers["other"]):
+        result = client.get(cover, headers=auth)
+        assert result.status_code == 200 and result.data == image
+    assert client.get(cover, headers={"Authorization": "Bearer broken"}).status_code == 401
+
+    buy(env, toolkit)
+    assert client.put(f"/api/toolkits/{toolkit['id']}/status", json={"status": "offline"},
+                      headers=headers["seller"]).status_code == 200
+    assert client.get(f"/api/toolkits/{toolkit['id']}", headers=headers["buyer"]).json["cover"] == cover
+    for auth in ({}, headers["other"]):
+        assert client.get(cover, headers=auth).status_code == 404
+    for who in ("buyer", "seller", "admin"):
+        result = client.get(cover, headers=headers[who])
+        assert result.status_code == 200 and result.data == image
+
+    with app.app_context():
+        db.session.get(FileAsset, asset_id).is_public = False
+        db.session.commit()
+    assert client.get(cover, headers=headers["buyer"]).status_code == 404
+    assert client.get(cover, headers=headers["seller"]).status_code == 200
+    with app.app_context():
+        db.session.get(FileAsset, asset_id).is_public = True
+        db.session.commit()
+
+    assert client.put(f"/api/toolkits/{toolkit['id']}/status", json={"status": "draft"},
+                      headers=headers["admin"]).status_code == 200
+    for auth in ({}, headers["buyer"], headers["other"]):
+        assert client.get(cover, headers=auth).status_code == 404
+    for who in ("seller", "admin"):
+        assert client.get(cover, headers=headers[who]).status_code == 200
+
+
+def test_new_draft_cover_visible_to_author_and_admin_only(env):
+    _, client, _, headers, _ = env
+    image = png_bytes()
+    response = client.post("/api/toolkits", data={
+        "title": "Draft cover", "description": "description", "status": "draft",
+        "cover_file": (io.BytesIO(image), "draft.png"),
+    }, headers=headers["seller"])
+    assert response.status_code == 201, response.json
+    cover = response.json["cover"]
+    assert client.get(f"/api/toolkits/{response.json['id']}", headers=headers["admin"]).json["cover"] == cover
+    for auth in ({}, headers["buyer"], headers["other"]):
+        assert client.get(cover, headers=auth).status_code == 404
+    for who in ("seller", "admin"):
+        result = client.get(cover, headers=headers[who])
+        assert result.status_code == 200 and result.data == image
+
+
 def test_free_favorite_complete_and_download_count(env):
     app, client, _, headers, uploads = env
     free = make_toolkit(env, price=0, resource=b"free bytes")
@@ -526,7 +596,7 @@ def test_edit_replaces_resource_after_commit_and_keeps_author_ownership(env):
     assert download.data == b"replacement"
     download.close()
     # Admin editing text must not acquire/delete the author's resource ownership.
-    edit = client.put(f"/api/toolkits/{toolkit['id']}", json={"title": "admin edited", "description": "desc", "lessons": []}, headers=headers["admin"])
+    edit = client.put(f"/api/toolkits/{toolkit['id']}", json={"title": "admin edited", "description": "desc", "lessons": [{"title": "new", "content": "new body"}]}, headers=headers["admin"])
     assert edit.status_code == 200, edit.json
     with app.app_context():
         active = FileAsset.query.filter_by(state="active").one()

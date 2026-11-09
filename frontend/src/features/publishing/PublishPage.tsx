@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { api } from '../../shared/api'
 import { useAuth } from '../../AuthContext'
 import { useRequestScope } from '../../useRequestScope'
+import { SelectedFilePreview, SelectedImage } from '../../components/SelectedFilePreview'
 
 type DraftLesson = { title: string; content: string; duration: number; image: string; contentType?: string }
 type PublishStatus = 'published' | 'draft'
@@ -17,12 +18,19 @@ const MAX_LESSONS = 50
 const MAX_FILE_SIZE = 40 * 1024 * 1024
 const MAX_REQUEST_SIZE = 100 * 1024 * 1024
 
-function uploadError(lessonFiles: (File | null)[], resources: File[]) {
-  const files = [...lessonFiles.filter((file): file is File => file !== null), ...resources]
+function uploadError(coverFile: File | null, lessonImages: (File | null)[], lessonFiles: (File | null)[], resources: File[]) {
+  const files = [coverFile, ...lessonImages, ...lessonFiles, ...resources].filter((file): file is File => file !== null)
   const oversized = files.find(file => file.size > MAX_FILE_SIZE)
   if (oversized) return `${oversized.name} 超过单个文件 40 MB 的限制`
   if (files.reduce((total, file) => total + file.size, 0) > MAX_REQUEST_SIZE) {
-    return '教程原件与配套资源的文件总大小不能超过 100 MB'
+    return '封面、步骤配图、教程原件与资源的文件总大小不能超过 100 MB'
+  }
+  return ''
+}
+
+function imageError(file: File) {
+  if (!/\.(?:jpe?g|png|webp|gif)$/i.test(file.name) || (file.type && !['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.type))) {
+    return '图片仅支持 JPG、PNG、WebP、GIF 文件（不支持 SVG）'
   }
   return ''
 }
@@ -37,6 +45,10 @@ export function PublishPage() {
   const [resourceError, setResourceError] = useState('')
   const [formError, setFormError] = useState('')
   const [lessonFileErrors, setLessonFileErrors] = useState<(string | null)[]>([null])
+  const [coverFile, setCoverFile] = useState<File | null>(null)
+  const [coverFileError, setCoverFileError] = useState('')
+  const [lessonImages, setLessonImages] = useState<(File | null)[]>([null])
+  const [lessonImageErrors, setLessonImageErrors] = useState<(string | null)[]>([null])
   const inFlight = useRef(false)
   const [form, setForm] = useState({ title: '', description: '', category: '生信分析', level: '入门', price: '0', tags: '', cover: '' })
   const [lessons, setLessons] = useState<DraftLesson[]>([{ title: '认识工作流与环境准备', content: '', duration: 10, image: '' }])
@@ -49,6 +61,10 @@ export function PublishPage() {
     setResourceError('')
     setFormError('')
     setLessonFileErrors([null])
+    setCoverFile(null)
+    setCoverFileError('')
+    setLessonImages([null])
+    setLessonImageErrors([null])
     setForm({ title: '', description: '', category: '生信分析', level: '入门', price: '0', tags: '', cover: '' })
     setLessons([{ title: '认识工作流与环境准备', content: '', duration: 10, image: '' }])
     setLessonFiles([null])
@@ -76,7 +92,8 @@ export function PublishPage() {
       if (!(status === 'draft' && lesson.duration === 0) && (!Number.isInteger(lesson.duration) || lesson.duration < 1 || lesson.duration > 600)) return `第 ${i + 1} 步的预计学习时长须为 1–600 分钟的整数`
       if (publishing && !lessonFiles[i] && !lesson.content.trim()) return `请填写第 ${i + 1} 步正文，或上传教程原件`
     }
-    return uploadError(lessonFiles, resources)
+    if (resources.length > 20) return '配套资源最多选择 20 个'
+    return uploadError(coverFile, lessonImages, lessonFiles, resources)
   }
 
   const submit = async (status: PublishStatus) => {
@@ -93,9 +110,11 @@ export function PublishPage() {
     const request = scope.begin('publish')
     try {
       const body = new FormData()
-      Object.entries(form).forEach(([key, value]) => body.append(key, value))
+      Object.entries(form).forEach(([key, value]) => body.append(key, key === 'cover' && coverFile ? '' : value))
       body.append('status', status)
-      body.append('lessons', JSON.stringify(lessons.map((lesson, index) => ({ ...lesson, preview: index === 0 }))))
+      body.append('lessons', JSON.stringify(lessons.map((lesson, index) => ({ ...lesson, image: lessonImages[index] ? '' : lesson.image, preview: index === 0 }))))
+      if (coverFile) body.append('cover_file', coverFile)
+      lessonImages.forEach((file, index) => { if (file) body.append(`lesson_image_${index}`, file) })
       lessonFiles.forEach((file, index) => { if (file) body.append(`lesson_file_${index}`, file) })
       resources.forEach(file => body.append('resource', file))
       const result = await api<{ id: number }>('/toolkits', { method: 'POST', body, signal: request.signal })
@@ -123,9 +142,26 @@ export function PublishPage() {
     setFormError('')
   }
 
+  const updateCoverFile = (file: File | null) => {
+    const error = file ? imageError(file) || uploadError(file, lessonImages, lessonFiles, resources) : ''
+    if (error) { setCoverFileError(error); return }
+    setCoverFile(file)
+    setCoverFileError('')
+    setFormError('')
+  }
+
+  const updateLessonImage = (index: number, file: File | null) => {
+    const nextImages = lessonImages.map((current, i) => i === index ? file : current)
+    const error = file ? imageError(file) || uploadError(coverFile, nextImages, lessonFiles, resources) : ''
+    if (error) { setLessonImageErrors(current => current.map((message, i) => i === index ? error : message)); return }
+    setLessonImages(nextImages)
+    setLessonImageErrors(current => current.map((message, i) => i === index ? null : message))
+    setFormError('')
+  }
+
   const updateLessonFile = (index: number, file: File | null) => {
     const nextFiles = lessonFiles.map((current, i) => i === index ? file : current)
-    const error = uploadError(nextFiles, resources)
+    const error = uploadError(coverFile, lessonImages, nextFiles, resources)
     if (error) {
       setLessonFileErrors(current => current.map((message, i) => i === index ? error : message))
       return
@@ -142,7 +178,7 @@ export function PublishPage() {
       setResourceError('配套资源最多选择 20 个；原有已选文件已保留')
       return
     }
-    const error = uploadError(lessonFiles, nextResources)
+    const error = uploadError(coverFile, lessonImages, lessonFiles, nextResources)
     if (error) {
       setResourceError(`${error}；原有已选文件已保留`)
       return
@@ -201,8 +237,19 @@ export function PublishPage() {
             </div>
             <div className="sm:col-span-2">
               <label htmlFor="toolkit-cover" className="label"><Image size={15} className="mr-1.5 inline" />封面图片 URL（选填）</label>
-              <input id="toolkit-cover" maxLength={500} className="input" placeholder="https://..." value={form.cover} onChange={event => updateForm('cover', event.target.value)} />
-              <p className="mt-1 text-xs text-slate-400">用于工具包列表和详情页展示</p>
+              <input id="toolkit-cover" maxLength={500} className="input" placeholder="https://..." value={form.cover} disabled={!!coverFile} onChange={event => updateForm('cover', event.target.value)} />
+              <label htmlFor="toolkit-cover-file" className="label mt-3">或上传封面图片（选填）</label>
+              <input id="toolkit-cover-file" type="file" accept=".jpg,.jpeg,.png,.webp,.gif" className="input mt-1" onChange={event => {
+                const file = event.currentTarget.files?.[0]
+                event.currentTarget.value = ''
+                if (file) updateCoverFile(file)
+              }} />
+              {coverFile && <div className="mt-2"><span className="text-xs text-emerald-700">已选择：{coverFile.name}</span>
+                <button type="button" className="ml-3 text-xs text-slate-500 underline" onClick={() => updateCoverFile(null)}>移除封面文件</button>
+                <SelectedImage file={coverFile} name="封面缩略图" />
+              </div>}
+              {coverFileError && <p role="alert" className="mt-2 text-xs text-rose-600">{coverFileError}</p>}
+              <p className="mt-1 text-xs text-slate-400">用于工具包列表和详情页；上传文件时暂停使用 URL，移除文件后可恢复。支持 JPG/PNG/WebP/GIF，不支持 SVG。</p>
             </div>
           </div>
         </section>
@@ -218,6 +265,8 @@ export function PublishPage() {
               setLessons(current => [...current, { title: '', content: '', duration: 10, image: '' }])
               setLessonFiles(current => [...current, null])
               setLessonFileErrors(current => [...current, null])
+              setLessonImages(current => [...current, null])
+              setLessonImageErrors(current => [...current, null])
             }}><Plus size={16} />添加步骤</button>
           </div>
           <div className="mt-6 space-y-5">
@@ -229,6 +278,8 @@ export function PublishPage() {
                     setLessons(current => current.filter((_, i) => i !== index))
                     setLessonFiles(current => current.filter((_, i) => i !== index))
                     setLessonFileErrors(current => current.filter((_, i) => i !== index))
+                    setLessonImages(current => current.filter((_, i) => i !== index))
+                    setLessonImageErrors(current => current.filter((_, i) => i !== index))
                   }} className="text-red-400"><Trash2 size={17} /></button>}
                 </div>
 
@@ -263,9 +314,22 @@ export function PublishPage() {
                 </div>
                 <p className="mt-2 text-xs text-slate-400">支持 Markdown/TXT、Word、PDF、PPT、HTML、RTF 文件；单个文件不超过 40 MB。</p>
                 {lessonFileErrors[index] && <p role="alert" className="mt-2 text-xs text-rose-600">{lessonFileErrors[index]}</p>}
+                {lessonFiles[index] && <details className="mt-2 text-sm"><summary className="cursor-pointer text-emerald-700">预览教程原件</summary><div className="mt-2"><SelectedFilePreview file={lessonFiles[index]} name={lessonFiles[index].name} /></div></details>}
 
                 <label htmlFor={`lesson-image-${index}`} className="label mt-4">本步骤配图 URL（选填）</label>
-                <input id={`lesson-image-${index}`} maxLength={500} className="input mt-1" placeholder="https://..." value={lesson.image} onChange={event => updateLesson(index, 'image', event.target.value)} />
+                <input id={`lesson-image-${index}`} maxLength={500} disabled={!!lessonImages[index]} className="input mt-1" placeholder="https://..." value={lesson.image} onChange={event => updateLesson(index, 'image', event.target.value)} />
+                <label htmlFor={`lesson-image-file-${index}`} className="label mt-3">或上传本步骤配图（选填）</label>
+                <input id={`lesson-image-file-${index}`} type="file" accept=".jpg,.jpeg,.png,.webp,.gif" className="input mt-1" onChange={event => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  if (file) updateLessonImage(index, file)
+                }} />
+                {lessonImages[index] && <div className="mt-2"><span className="text-xs text-emerald-700">已选择：{lessonImages[index].name}</span>
+                  <button type="button" className="ml-3 text-xs text-slate-500 underline" onClick={() => updateLessonImage(index, null)}>移除第 {index + 1} 步配图</button>
+                  <SelectedImage file={lessonImages[index]} name={`第 ${index + 1} 步配图缩略图`} />
+                </div>}
+                {lessonImageErrors[index] && <p role="alert" className="mt-2 text-xs text-rose-600">{lessonImageErrors[index]}</p>}
+                <p className="mt-1 text-xs text-slate-400">上传文件时暂停使用配图 URL；移除文件后可恢复。仅支持 JPG/PNG/WebP/GIF。</p>
               </div>
             ))}
           </div>
@@ -273,7 +337,7 @@ export function PublishPage() {
 
         <section className="panel p-6 sm:p-8">
           <h2 className="text-lg font-black text-ink">配套资源（选填）</h2>
-          <p id="resource-help" className="mt-1 text-xs text-slate-500">脚本、示例数据等；最多 20 个，每个不超过 40 MB，教程原件与资源总大小不超过 100 MB。</p>
+          <p id="resource-help" className="mt-1 text-xs text-slate-500">脚本、示例数据等；最多 20 个，每个文件不超过 40 MB，封面、配图、教程原件与资源合计不超过 100 MB。图片/PDF/文字可在上传前预览；Word/PPT 请保存后查看解析结果。</p>
           <label htmlFor="toolkit-resources" className="mt-5 flex cursor-pointer flex-col items-center rounded-2xl border-2 border-dashed p-8 text-center transition hover:border-pine hover:bg-emerald-50/30 focus-within:ring-2 focus-within:ring-pine focus-within:ring-offset-2">
             <UploadCloud className="text-emerald-700" />
             <b className="mt-3 text-sm text-ink">{resources.length ? `已选择 ${resources.length} 个文件` : '点击选择资源文件（可多选）'}</b>
@@ -285,6 +349,10 @@ export function PublishPage() {
             }} />
           </label>
           {resourceError && <p role="alert" className="mt-3 text-sm text-rose-600">{resourceError}</p>}
+          {resources.map((file, index) => <details key={`${file.name}-${file.lastModified}-${index}`} className="mt-2 rounded-xl border p-3 text-sm">
+            <summary className="cursor-pointer text-emerald-700">预览资源：{file.name}</summary>
+            <div className="mt-2"><SelectedFilePreview file={file} name={file.name} /></div>
+          </details>)}
           {resources.length > 0 && <button type="button" className="btn-ghost mt-3" onClick={() => { setResources([]); setResourceError('') }}><Trash2 size={14} />清空已选文件</button>}
         </section>
 

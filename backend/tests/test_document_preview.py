@@ -5,6 +5,8 @@ import json
 import zipfile
 from pathlib import Path
 
+from sqlalchemy import delete, select
+
 import pytest
 from docx import Document
 from flask_jwt_extended import create_access_token
@@ -17,7 +19,7 @@ from werkzeug.security import generate_password_hash
 
 from app import db
 from document_converter import convert_rtf_to_html, render_ppt_preview
-from models import Lesson, User
+from models import FileAsset, FileReference, Lesson, User
 
 
 @pytest.fixture
@@ -153,13 +155,32 @@ def test_preview_shares_raw_policy_across_preview_paid_draft_offline(env):
         assert client.get(f"/api/{prefix}/{paid_locked}", headers=headers["stranger"]).status_code == 403
 
 
+def _raw_asset(app, lesson_id):
+    with app.app_context():
+        ref = db.session.execute(select(FileReference).where(
+            FileReference.lesson_id == lesson_id, FileReference.usage == "lesson_raw")).scalar_one()
+        asset = db.session.get(FileAsset, ref.asset_id)
+        return Path(app.config["UPLOAD_FOLDER"]) / "lesson_raw" / asset.stored_name, asset.id
+
+
 def test_raw_and_preview_paths_cannot_escape_storage_or_cross_lessons(env, tmp_path):
     app, client, headers = env
     kit = upload_document(env, sample_ppt(), "safe.pptx", two_lessons=True)
     first, second = (lesson["id"] for lesson in kit["lessons"])
+    # Explicitly construct historical, unregistered originals: object-backed
+    # originals are resolved by immutable lesson references, not arbitrary paths.
     with app.app_context():
-        first_path = Path(db.session.get(Lesson, first).raw_file_path)
-        second_path = Path(db.session.get(Lesson, second).raw_file_path)
+        root = Path(app.config["UPLOAD_FOLDER"]) / "lesson_raw"
+        root.mkdir(exist_ok=True)
+        first_path = root / f"lesson_{first}_fixture.pptx"
+        second_path = root / f"lesson_{second}_fixture.pptx"
+        first_path.write_bytes(sample_ppt())
+        second_path.write_bytes(sample_ppt())
+        db.session.execute(delete(FileReference).where(
+            FileReference.lesson_id.in_([first, second]), FileReference.usage == "lesson_raw"))
+        db.session.get(Lesson, first).raw_file_path = str(first_path)
+        db.session.get(Lesson, second).raw_file_path = str(second_path)
+        db.session.commit()
     outside = tmp_path / "lesson_raw" / f"lesson_{first}_outside.pptx"
     outside.parent.mkdir()
     outside.write_bytes(sample_ppt())
@@ -249,11 +270,13 @@ def test_draft_toolkit_deletion_reclaims_private_originals(env):
     app, client, headers = env
     kit = upload_document(env, sample_ppt(), "private.pptx", price=0, status="draft")
     lesson_id = kit["lessons"][0]["id"]
-    with app.app_context():
-        original = Path(db.session.get(Lesson, lesson_id).raw_file_path)
+    original, asset_id = _raw_asset(app, lesson_id)
+    assert original.exists()
     response = client.delete(f"/api/toolkits/{kit['id']}", headers=headers["author"])
     assert response.status_code == 200 and response.json["mode"] == "deleted"
     assert not original.exists()
+    with app.app_context():
+        assert db.session.get(FileAsset, asset_id).state == "deleted"
 
 
 def test_title_only_partial_edit_keeps_markdown_body(env):
@@ -274,8 +297,7 @@ def test_unicode_filename_keeps_extension_and_replacement_reclaims_old_original(
     kit = upload_document(env, sample_ppt(), "教材.pptx", price=0)
     lesson = kit["lessons"][0]
     lesson_id = lesson["id"]
-    with app.app_context():
-        original = Path(db.session.get(Lesson, lesson_id).raw_file_path)
+    original, old_id = _raw_asset(app, lesson_id)
     assert original.suffix == ".pptx" and original.exists()
     assert client.get(lesson["rawFileUrl"]).status_code == 200
     assert client.get(f"/api/lesson-preview/{lesson_id}").status_code == 200
@@ -285,9 +307,8 @@ def test_unicode_filename_keeps_extension_and_replacement_reclaims_old_original(
         "lesson_file_0": (io.BytesIO(sample_ppt()), "第二版.pptx"),
     }, headers=headers["author"])
     assert response.status_code == 200, response.json
-    with app.app_context():
-        replacement = Path(db.session.get(Lesson, lesson_id).raw_file_path)
-    assert replacement != original and replacement.exists()
+    replacement, new_id = _raw_asset(app, lesson_id)
+    assert new_id != old_id and replacement != original and replacement.exists()
     assert not original.exists()
     assert client.get(f"/api/lesson-preview/{lesson_id}").status_code == 200
 

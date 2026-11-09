@@ -26,13 +26,26 @@ async function responseError(response: Response) {
   return new ApiError(data.message || '请求失败，请稍后再试', response.status)
 }
 
-export async function downloadAuthed(path: string, filename: string, options: { signal?: AbortSignal; current?: () => boolean } = {}) {
+// Backend resource URLs already include /api; page calls generally omit it.
+// Normalize only here so downloads and JSON/blob requests share one boundary.
+function apiUrl(path: string) {
+  if (!path.startsWith('/') || path.startsWith('//')) throw new Error('API 路径无效')
+  return path === '/api' || path.startsWith('/api/') ? path : `/api${path}`
+}
+
+type BlobOptions = { signal?: AbortSignal; current?: () => boolean }
+export async function fetchAuthedBlob(path: string, options: BlobOptions = {}) {
   const token = getToken(), generation = getSessionGeneration()
-  const response = await fetch(`/api${path}`, { signal: options.signal, headers: token ? { Authorization: `Bearer ${token}` } : {} })
-  if (options.signal?.aborted || (options.current && !options.current())) throw superseded()
+  const response = await fetch(apiUrl(path), { signal: options.signal, headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  if (options.signal?.aborted || (options.current && !options.current()) || !sessionMatches(generation, token)) throw superseded()
   if (!response.ok) { expire(response.status, token, generation); throw await responseError(response) }
   const blob = await response.blob()
   if (!sessionMatches(generation, token) || options.signal?.aborted || (options.current && !options.current())) throw superseded()
+  return { blob, contentType: response.headers.get('Content-Type')?.split(';', 1)[0].toLowerCase() || blob.type.split(';', 1)[0].toLowerCase() }
+}
+
+export async function downloadAuthed(path: string, filename: string, options: BlobOptions = {}) {
+  const { blob } = await fetchAuthedBlob(path, options)
   const url = URL.createObjectURL(blob)
   try {
     const anchor = document.createElement('a')
@@ -49,7 +62,7 @@ export async function api<T>(path: string, options: RequestInit & { current?: ()
   if (token && !credentials) headers.set('Authorization', `Bearer ${token}`)
   if (credentials) headers.delete('Authorization')
   const { current, ...init } = options
-  const response = await fetch(`/api${path}`, { ...init, headers })
+  const response = await fetch(apiUrl(path), { ...init, headers })
   // An aborted/superseded request can still resolve in a fetch implementation.
   // It must not expire the unchanged old token while a newer login is pending.
   if (options.signal?.aborted || (current && !current())) throw superseded()

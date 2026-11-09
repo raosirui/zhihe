@@ -1,8 +1,9 @@
 """Explicit application configuration; no dotenv/database/filesystem IO on import."""
 import os
+import re
 from datetime import timedelta
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 WEAK_KEYS = {"", "dev-only-change-me", "replace-with-a-long-random-secret", "dev-local-secret-please-replace", "test-secret"}
 
@@ -65,6 +66,13 @@ def build_config(config_override=None):
         "TRUSTED_PROXY_CIDRS": source.get("TRUSTED_PROXY_CIDRS", []),
         "RATE_LIMIT_CAPACITY": int(source.get("RATE_LIMIT_CAPACITY", 10000)),
         "RATE_LIMIT_SECRET": source.get("RATE_LIMIT_SECRET") or source.get("JWT_SECRET_KEY", "dev-only-change-me"),
+        "FILE_STORAGE_BACKEND": source.get("FILE_STORAGE_BACKEND", "local"),
+        "S3_BUCKET": source.get("S3_BUCKET"),
+        "S3_REGION": source.get("S3_REGION"),
+        "S3_ENDPOINT_URL": source.get("S3_ENDPOINT_URL"),
+        "S3_ACCESS_KEY_ID": source.get("S3_ACCESS_KEY_ID"),
+        "S3_SECRET_ACCESS_KEY": source.get("S3_SECRET_ACCESS_KEY"),
+        "S3_SESSION_TOKEN": source.get("S3_SESSION_TOKEN"),
         "FILE_USER_QUOTA": int(source.get("FILE_USER_QUOTA", 1024 * 1024 * 1024)),
         "FILE_MAX_SIZE": int(source.get("FILE_MAX_SIZE", 40 * 1024 * 1024)),
         "FILE_OPERATION_GRACE_SECONDS": int(source.get("FILE_OPERATION_GRACE_SECONDS", 3600)),
@@ -85,4 +93,22 @@ def build_config(config_override=None):
             raise ValueError("Production forbids debug, testing, demo seed and simulated money")
     if config["RATE_LIMIT_CAPACITY"] < 1:
         raise ValueError("RATE_LIMIT_CAPACITY must be positive")
+    if config["FILE_STORAGE_BACKEND"] not in {"local", "s3"}:
+        raise ValueError("FILE_STORAGE_BACKEND must be local or s3")
+    if config["FILE_STORAGE_BACKEND"] == "s3":
+        bucket, region = config["S3_BUCKET"], config["S3_REGION"]
+        if not isinstance(bucket, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket):
+            raise ValueError("S3 storage requires a valid S3_BUCKET")
+        if not isinstance(region, str) or not re.fullmatch(r"[A-Za-z0-9-]{2,40}", region):
+            raise ValueError("S3 storage requires an explicit S3_REGION")
+        access_key, secret_key = config["S3_ACCESS_KEY_ID"], config["S3_SECRET_ACCESS_KEY"]
+        if bool(access_key) != bool(secret_key) or (config["S3_SESSION_TOKEN"] and not access_key):
+            raise ValueError("Explicit S3 credentials require access key and secret key together")
+        endpoint = config["S3_ENDPOINT_URL"]
+        if endpoint:
+            parsed = urlsplit(endpoint)
+            if (parsed.scheme not in {"https", "http"} or not parsed.hostname or
+                    parsed.username or parsed.password or parsed.query or parsed.fragment or
+                    (parsed.scheme == "http" and parsed.hostname not in {"127.0.0.1", "::1", "localhost"})):
+                raise ValueError("S3_ENDPOINT_URL requires HTTPS or a loopback HTTP endpoint")
     return config

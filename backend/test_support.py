@@ -71,6 +71,8 @@ class IsolatedMySQL:
                              "--local-infile=0", f"--secure-file-priv={files}",
                              "--max-connections=40", "--innodb-lock-wait-timeout=8", "--innodb-use-native-aio=0",
                              "--transaction-isolation=REPEATABLE-READ"]
+            if os.geteuid() == 0:
+                args.append("--user=root")  # Only this disposable, socket-only fixture runs as root.
             self._process = subprocess.Popen(args, stdout=self._log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 90
             while time.monotonic() < deadline:

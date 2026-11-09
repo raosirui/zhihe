@@ -154,6 +154,26 @@ describe('learning space', () => {
 })
 
 describe('protected images', () => {
+  it('auth-fetches owner draft covers while leaving published covers as plain images', async () => {
+    setToken('owner')
+    const create = vi.fn(() => 'blob:draft-cover'), revoke = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }))
+    const { calls } = mockFetch(({ path }) => path === '/uploads/draft.png' ? new Response('image') : undefined)
+    const result = renderPage(<><ProtectedImage src="/api/uploads/draft.png?token=bad" protectedCover alt="Draft cover" />
+      <ProtectedImage src="/api/uploads/public.png" alt="Public cover" /></>, '/', '/', undefined, true)
+    expect(await screen.findByRole('img', { name: 'Draft cover' })).toHaveAttribute('src', 'blob:draft-cover')
+    expect(screen.getByRole('img', { name: 'Public cover' })).toHaveAttribute('src', '/api/uploads/public.png')
+    const request = calls.find(call => call.path === '/uploads/draft.png')!
+    expect(request.url).toBe('/api/uploads/draft.png')
+    expect(new Headers(request.options.headers).get('Authorization')).toBe('Bearer owner')
+    expect(calls.some(call => call.path === '/uploads/public.png')).toBe(false)
+    const priorRequests = calls.filter(call => call.path === '/uploads/draft.png').length
+    fireEvent.click(screen.getByRole('button', { name: 'Logout session' }))
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith('blob:draft-cover'))
+    expect(calls.filter(call => call.path === '/uploads/draft.png')).toHaveLength(priorRequests)
+    result.unmount()
+  })
+
   it('fetches same-origin lesson assets with header credentials, strips query JWT and revokes blob on cleanup', async () => {
     setToken('A'); const create = vi.fn(() => 'blob:protected'), revoke = vi.fn()
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }))

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload, undefer
 
 from extensions import db
-from models import Favorite, Lesson, Purchase, Toolkit, ASSET_PATH, LESSON_ASSET_PATH
+from models import Favorite, FileReference, Lesson, Purchase, Toolkit, ASSET_PATH, LESSON_ASSET_PATH
 from security import APIError, assert_identity
 from access import is_manager, is_visible
 import money_service as money
@@ -82,12 +82,22 @@ def _accessible_lesson_raw(lesson_id):
 
     user = optional_user()
     lesson = db.session.get(Lesson, lesson_id)
-    if not lesson or not lesson.raw_file_path:
+    if not lesson:
         raise APIError("原始文件不存在", 404)
     toolkit = lesson.toolkit
     purchased = _purchased(db.session, user, toolkit.id)
     if not is_visible(toolkit, user, purchased) or not can_learn(toolkit, user, purchased, lesson):
         raise APIError("无权访问", 403)
+    ref = db.session.execute(select(FileReference).where(
+        FileReference.toolkit_id == toolkit.id, FileReference.lesson_id == lesson.id,
+        FileReference.usage == "lesson_raw")).scalar_one_or_none()
+    if ref:
+        asset = ref.asset
+        if not asset or asset.purpose != "lesson_raw" or asset.state not in {"active", "legacy", "retained"}:
+            raise APIError("原始文件已丢失", 404)
+        return lesson, asset
+    if not lesson.raw_file_path:
+        raise APIError("原始文件不存在", 404)
     base = (Path(current_app.config["UPLOAD_FOLDER"]) / "lesson_raw").resolve()
     path = Path(lesson.raw_file_path)
     if (path.name.startswith(f"lesson_{lesson.id}_") and

@@ -184,12 +184,13 @@ def create_app(config_override=None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         protected = request.path.startswith((LESSON_ASSET_PATH, "/api/lesson-raw/", "/api/lesson-preview/",
                                               "/api/auth/", "/api/wallet", "/api/me/", "/api/orders", "/api/admin/"))
+        resource_preview = request.path.startswith("/api/toolkits/") and request.path.endswith("/preview")
         authenticated = bool(request.headers.get("Authorization"))
-        if protected or authenticated or response.status_code >= 400:
+        if protected or resource_preview or authenticated or response.status_code >= 400:
             response.headers["Cache-Control"] = ("private, no-store" if request.path.startswith("/api/lesson-preview/")
                                                  else "no-store")
             response.headers["Pragma"] = "no-cache"
-        if request.path.startswith((ASSET_PATH, LESSON_ASSET_PATH)):
+        if resource_preview or request.path.startswith((ASSET_PATH, LESSON_ASSET_PATH)):
             response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
         return response
 

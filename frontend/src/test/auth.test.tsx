@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
-import { api, downloadAuthed, getToken, setToken } from '../lib'
+import { api, downloadAuthed, fetchAuthedBlob, getToken, setToken } from '../lib'
 import { AuthModal } from '../components/AuthModal'
 import { AuthControls, deferred, json, mockFetch, other, renderPage, settle, user } from './helpers'
 
@@ -39,6 +39,24 @@ describe('authentication and scoped transport', () => {
     await api('/upload', { method: 'POST', body, signal: controller.signal })
     expect(calls[0].options.body).toBe(body); expect(calls[0].options.signal).toBe(controller.signal)
     expect(new Headers(calls[0].options.headers).has('Content-Type')).toBe(false)
+  })
+  it('uses exactly one /api prefix for backend resource download URLs and blob previews', async () => {
+    setToken('A')
+    const create = vi.fn(() => 'blob:download'), revoke = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }))
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const { calls } = mockFetch(({ path }) => path.endsWith('/preview') ? new Response('text', { headers: { 'Content-Type': 'text/plain' } }) :
+      path.endsWith('/download') ? new Response('resource') : path === '/toolkits/8' ? json({ id: 8 }) : undefined)
+    await downloadAuthed('/api/toolkits/8/resources/3/download', 'resource.txt')
+    const preview = await fetchAuthedBlob('/api/toolkits/8/resources/3/preview')
+    await api('/api/toolkits/8')
+    expect(calls.slice(0, 3).map(call => call.url)).toEqual([
+      '/api/toolkits/8/resources/3/download', '/api/toolkits/8/resources/3/preview', '/api/toolkits/8',
+    ])
+    expect(new Headers(calls[0].options.headers).get('Authorization')).toBe('Bearer A')
+    expect(preview.contentType).toBe('text/plain')
+    expect(click).toHaveBeenCalledOnce()
+    expect(revoke).toHaveBeenCalledWith('blob:download')
   })
   it('download 401 shares expiration rules and a stale successful blob cannot download', async () => {
     setToken('A'); mockFetch(() => json({ message: 'expired download' }, 401))

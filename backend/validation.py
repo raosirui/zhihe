@@ -11,7 +11,7 @@ MAX_ITEM_BYTES = 40 * 1024 * 1024
 MAX_LESSON_BYTES = 1024 * 1024
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_PARSED_TEXT_BYTES = 20 * 1024 * 1024
-MAX_ZIP_COMPRESSED = 100 * 1024 * 1024
+MAX_ZIP_COMPRESSED = 100 * 1024 * 1024 - 64 * 1024  # Leave room for multipart within the request limit.
 MAX_ZIP_UNCOMPRESSED = 300 * 1024 * 1024
 MAX_ZIP_MEMBERS = 2000
 MAX_DESCRIPTION_CHARS = 20000
@@ -23,6 +23,16 @@ CATEGORIES = ["生信分析", "单细胞", "空间组学", "结构生物学", "�
 LEVELS = ["入门", "进阶", "专业"]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}
 REJECTED_RESOURCE_EXTENSIONS = {".exe", ".bat", ".cmd", ".com", ".scr", ".vbs", ".jse", ".wsf", ".ps1", ".dll", ".msi", ".hta"}
+DOCUMENT_EXTENSIONS = {
+    "markdown": [".md", ".markdown", ".txt"],
+    "word": [".docx"],
+    "pdf": [".pdf"],
+    "html": [".html", ".htm"],
+    "richtext": [".rtf"],
+    "ppt": [".pptx"],
+}
+DOCUMENT_FILE_EXTENSIONS = {extension for extensions in DOCUMENT_EXTENSIONS.values()
+                            for extension in extensions}
 
 
 def parse_money(value, minimum, maximum, field="金额") -> Decimal:
@@ -99,13 +109,25 @@ def image_source(value, field):
     return None, rel
 
 
+def rejected_resource_extension(filename):
+    return any("." + part.lower() in REJECTED_RESOURCE_EXTENSIONS
+               for part in filename.split(".")[1:])
+
+
 def resource_source(value, field="resource"):
     value = string_field(value, field, MAX_PATH_CHARS)
     if not value:
         return None
     rel = normalize_relative_path(value, field)
-    if posixpath.splitext(rel)[1].lower() in REJECTED_RESOURCE_EXTENSIONS:
+    if rejected_resource_extension(posixpath.basename(rel)):
         raise ValueError(f"{field}不能是可执行文件类型")
+    return rel
+
+
+def document_source(value, field="documentFile"):
+    rel = normalize_relative_path(value, field)
+    if posixpath.splitext(rel)[1].lower() not in DOCUMENT_FILE_EXTENSIONS:
+        raise ValueError(f"{field}不是支持的教程文档格式")
     return rel
 
 
@@ -165,7 +187,7 @@ def normalize_batch_item(raw, index, resolver, text_budget):
         raise ValueError("条目必须是 JSON 对象")
     title = string_field(raw.get("title"), "title", 120, required=True)
     description = string_field(raw.get("description"), "description", MAX_DESCRIPTION_CHARS, required=True)
-    summary = string_field(raw.get("summary", ""), "summary", 500) or description[:500]
+    summary = string_field(raw.get("summary", ""), "summary", 500) or description[:120]
     category = string_field(raw.get("category", CATEGORIES[0]), "category", 50, required=True)
     level = string_field(raw.get("level", LEVELS[0]), "level", 20, required=True)
     if category not in CATEGORIES:
@@ -192,9 +214,24 @@ def normalize_batch_item(raw, index, resolver, text_budget):
         if not isinstance(lesson, dict):
             raise ValueError(f"{field}必须是 JSON 对象")
         ltitle = string_field(lesson.get("title"), f"{field} title", 160, required=True)
-        if ("content" in lesson) == ("contentFile" in lesson):
-            raise ValueError(f"{field}必须且只能提供 content 或 contentFile")
-        body, content_file = None, None
+        document_rel = document_source(lesson["documentFile"], f"{field} documentFile") if "documentFile" in lesson else None
+        clear_document = lesson.get("clearDocument", False)
+        if type(clear_document) is not bool:
+            raise ValueError(f"{field} clearDocument 必须是 true/false")
+        if clear_document and document_rel:
+            raise ValueError(f"{field}不可同时清除和上传文档原件")
+        if clear_document and "content" not in lesson and "contentFile" not in lesson:
+            raise ValueError(f"{field}清除文档原件时必须提供正文")
+        lesson_id = lesson.get("id")
+        if lesson_id is not None and (type(lesson_id) is not int or lesson_id <= 0):
+            raise ValueError(f"{field} id 必须是正整数")
+        if "id" in lesson and lesson_id is None:
+            raise ValueError(f"{field} id 必须是正整数")
+        if "content" in lesson and "contentFile" in lesson:
+            raise ValueError(f"{field}不能同时提供 content 和 contentFile")
+        if "content" not in lesson and "contentFile" not in lesson and not document_rel:
+            raise ValueError(f"{field}请填写 content、contentFile 或 documentFile")
+        body, content_file = "", None
         if "content" in lesson:
             value = lesson["content"]
             if not isinstance(value, str):
@@ -203,10 +240,10 @@ def normalize_batch_item(raw, index, resolver, text_budget):
             if size > MAX_LESSON_BYTES:
                 raise ValueError(f"{field}正文超过 1MB")
             body = value.strip()
-            if not body:
-                raise ValueError(f"{field}正文不能为空")
+            if not body and not document_rel:
+                raise ValueError(f"{field}正文不能为空；或提供 documentFile")
             text_budget.charge(size)
-        else:
+        elif "contentFile" in lesson:
             content_file = normalize_relative_path(lesson["contentFile"], f"{field} contentFile")
         duration = lesson.get("duration", 10)
         if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 600:
@@ -216,16 +253,24 @@ def normalize_batch_item(raw, index, resolver, text_budget):
             raise ValueError(f"{field} preview 必须是 true/false")
         image_url, image_rel = image_source(lesson.get("image", ""), f"{field} image")
         text_budget.charge(len(ltitle.encode("utf-8")))
-        lesson_specs.append((ltitle, body, content_file, duration, preview, image_url, image_rel))
+        lesson_specs.append((ltitle, body, content_file, duration, preview, image_url, image_rel,
+                             document_rel, clear_document, lesson_id, "image" not in lesson))
     cover_url, cover_rel = image_source(raw.get("cover", ""), "cover")
     resource_rels = resource_sources(raw)
     lessons = []
-    for ltitle, body, content_file, duration, preview, image_url, image_rel in lesson_specs:
+    for (ltitle, body, content_file, duration, preview, image_url, image_rel,
+         document_rel, clear_document, lesson_id, image_omitted) in lesson_specs:
         if content_file is not None:
             body = resolver.text(content_file, "contentFile")
-        lessons.append({"title": ltitle, "content": body, "duration": duration,
+        document_file = resolver.asset(document_rel, "documentFile") if document_rel else None
+        if document_rel and posixpath.splitext(document_rel)[1].lower() in DOCUMENT_EXTENSIONS["markdown"]:
+            resolver.text(document_rel, "documentFile")  # Bound/charge original text even without contentFile.
+        lessons.append({"id": lesson_id, "title": ltitle, "content": body, "duration": duration,
                         "preview": preview, "image_url": image_url,
-                        "image_file": resolver.asset(image_rel, "image") if image_rel else None})
+                        "_image_omitted": image_omitted,
+                        "image_file": resolver.asset(image_rel, "image") if image_rel else None,
+                        "_file": document_file,
+                        "_clear_document": clear_document})
     cover_file = resolver.asset(cover_rel, "cover") if cover_rel else None
     resource_files = [resolver.asset(rel, "resource") for rel in resource_rels]
     for lesson in lessons:
@@ -233,11 +278,12 @@ def normalize_batch_item(raw, index, resolver, text_budget):
     return {"index": index, "title": title, "summary": summary, "description": description,
             "category": category, "level": level, "price": price, "tags": tags,
             "cover_url": cover_url, "cover_file": cover_file,
+            "_cover_omitted": "cover" not in raw,
             "cover_name": cover_file["name"] if cover_file else None,
             "resource_files": resource_files,
             "resource_file": resource_files[0] if resource_files else None,
             "resource_name": resource_files[0]["name"] if resource_files else None,
-            "lessons": lessons}
+            "lessons": lessons if "lessons" in raw else None}
 
 
 def item_error(index, raw, exc):

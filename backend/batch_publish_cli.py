@@ -177,7 +177,7 @@ def validate(root):
         print(f"第 {error['index'] + 1} 项 {error['title']}：{error['message']}")
     if errors:
         return False
-    print(f"校验通过，共 {len(items)} 个工具包")
+    print(f"本地结构校验通过，共 {len(items)} 个工具包；图片/文档内容与发布结果以服务端检查为准")
     return True
 
 
@@ -244,7 +244,7 @@ def pack(root, out, force=False):
                             or _signature(os.fstat(source.fileno())) != resolver.signatures[rel]):
                         raise ValueError("打包期间引用文件发生变化，请重新运行")
         if os.path.getsize(temporary) > MAX_ZIP_COMPRESSED:
-            raise ValueError("压缩包超过 100MB")
+            raise ValueError("压缩包超过上传上限（100MB 请求须预留 64KB 表单空间）")
         _atomic_install(temporary, out, force)
         temporary = None
         print(f"已打包 {out}（仅清单与显式引用文件）")
@@ -267,11 +267,9 @@ def init(root, force=False):
         if "TEMPLATE" in globals() and "DEMO_FILES" in globals():
             template, files = TEMPLATE, DEMO_FILES
         else:
-            from batch_kit import _clean_manifest, DEMO_COVER_SVG, DEMO_RESOURCE_SH, DEMO_LESSON_MD, README_TXT
+            from batch_kit import _clean_manifest, DEMO_FILES as template_files
             template = _clean_manifest().decode("utf-8")
-            files = {"covers/demo-cover.svg": DEMO_COVER_SVG,
-                     "resources/gsea_helper.sh": DEMO_RESOURCE_SH,
-                     "lessons/01-prepare.md": DEMO_LESSON_MD, "README.txt": README_TXT}
+            files = template_files
         root = _local_path(root)
         _reject_symlink_components(root)
         os.makedirs(root, exist_ok=True)

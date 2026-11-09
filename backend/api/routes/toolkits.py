@@ -12,7 +12,7 @@ from api import api
 from api.support import (_access_toolkit, _manage_locked, _serialize_list, persist_toolkit_item as _persist_item,
                          reclaim_asset)
 from extensions import db
-from models import (Favorite, FileAsset, Lesson, LessonProgress, Purchase, Toolkit, ASSET_PATH)
+from models import (Favorite, FileAsset, FileReference, Lesson, LessonProgress, Purchase, Toolkit, ASSET_PATH)
 from security import (APIError, assert_identity, current_user, json_object, optional_user,
                       positive_id, request_identity, text)
 from access import is_visible
@@ -42,6 +42,12 @@ def _single_item(partial=False):
         raise APIError(error)
     if partial and "lessons" not in data:
         lessons = None
+    cover_uploads = request.files.getlist("cover_file")
+    if len(cover_uploads) > 1:
+        raise APIError("每次只能上传一张封面")
+    cover_file = cover_uploads[0] if cover_uploads and cover_uploads[0].filename else None
+    if cover_file and data.get("cover", "").strip():
+        raise APIError("封面图片请选择上传文件或填写 URL，不可同时使用")
     files = [f for f in request.files.getlist("resource") if f and f.filename]
     if len(files) > MAX_BATCH_RESOURCES:
         raise APIError(f"附件不能超过 {MAX_BATCH_RESOURCES} 个")
@@ -49,6 +55,8 @@ def _single_item(partial=False):
     # Extract lesson document files (lesson_file_0, lesson_file_1, etc.)
     lesson_files = []
     for i in range(len(lessons) if lessons else 0):
+        if len(request.files.getlist(f"lesson_file_{i}")) > 1 or len(request.files.getlist(f"lesson_image_{i}")) > 1:
+            raise APIError("每节教程只能上传一个原件和一张配图")
         file = request.files.get(f"lesson_file_{i}")
         lesson_files.append(file if file and file.filename else None)
 
@@ -56,14 +64,25 @@ def _single_item(partial=False):
     if lessons:
         for i, lesson in enumerate(lessons):
             if i < len(lesson_files) and lesson_files[i]:
+                if lesson.get("_clear_document"):
+                    raise APIError(f"第 {i + 1} 节不可同时清除与上传教程原件")
                 lesson["_file"] = lesson_files[i]
+            image = request.files.get(f"lesson_image_{i}")
+            if image and image.filename:
+                if lesson.get("image_url"):
+                    raise APIError(f"第 {i + 1} 节配图不可同时上传文件和填写 URL")
+                lesson["image_file"] = {"name": image.filename, "stream": image.stream}
+    if any(key.startswith(("lesson_file_", "lesson_image_")) and key.rsplit("_", 1)[-1].isdigit()
+           and int(key.rsplit("_", 1)[-1]) >= len(lessons or []) for key in request.files):
+        raise APIError("教程附件索引超出范围")
     if not partial and status != "draft":
         validate_toolkit_completeness(fields["title"], fields["description"], [
             (lesson["title"], lesson["duration"], lesson["content"], bool(lesson.get("_file")))
             for lesson in lessons
         ])
 
-    return {**fields, "cover_file": None, "resource_files": [], "resource_streams": streams,
+    return {**fields, "cover_file": {"name": cover_file.filename, "stream": cover_file.stream} if cover_file else None,
+            "resource_files": [], "resource_streams": streams,
             "status": status, "lessons": lessons}
 
 
@@ -158,8 +177,11 @@ def update_status(toolkit_id):
             lessons = session.execute(select(Lesson).where(Lesson.toolkit_id == toolkit_id)
                                       .options(undefer(Lesson.content))
                                       .order_by(Lesson.sort_order, Lesson.id)).scalars().all()
+            raw_lesson_ids = set(session.execute(select(FileReference.lesson_id).where(
+                FileReference.toolkit_id == toolkit_id, FileReference.usage == "lesson_raw")).scalars())
             validate_toolkit_completeness(toolkit.title, toolkit.description, [
-                (lesson.title, lesson.duration, lesson.content, bool(lesson.raw_file_path))
+                (lesson.title, lesson.duration, lesson.content,
+                 bool(lesson.raw_file_path or lesson.id in raw_lesson_ids))
                 for lesson in lessons
             ])
         toolkit.status = status

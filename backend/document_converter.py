@@ -20,6 +20,7 @@ from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_SHAPE_TYPE
 from pptx.enum.text import PP_ALIGN
 from striprtf.striprtf import rtf_to_text
 from werkzeug.utils import secure_filename
+from validation import DOCUMENT_EXTENSIONS
 
 
 HTML_TAGS = bleach.ALLOWED_TAGS.union({
@@ -47,14 +48,7 @@ def sanitize_html(content):
                         protocols=bleach.ALLOWED_PROTOCOLS | {"data"}, strip=True)
 
 
-ALLOWED_EXTENSIONS = {
-    "markdown": [".md", ".markdown", ".txt"],
-    "word": [".docx"],
-    "pdf": [".pdf"],
-    "html": [".html", ".htm"],
-    "richtext": [".rtf"],
-    "ppt": [".pptx"],
-}
+ALLOWED_EXTENSIONS = DOCUMENT_EXTENSIONS
 
 
 def detect_content_type(filename):
