@@ -17,6 +17,7 @@ export default function AppRoutes() {
         <Route path="toolkits/:id/learn" element={<LearnPage />} />
         <Route path="checkout/:id" element={<CheckoutPage />} />
         <Route path="publish" element={<PublishPage />} />
+        <Route path="publish/:id" element={<PublishPage />} />
         <Route path="publish/batch" element={<BatchPublishPage />} />
         <Route path="me" element={<MeLayout />}>
           <Route index element={<MeDashboard />} />

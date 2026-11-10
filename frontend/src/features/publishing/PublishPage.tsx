@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { ArrowLeft, Image, PackageOpen, Plus, Trash2, UploadCloud } from 'lucide-react'
-import { Link, useNavigate, useOutletContext } from 'react-router-dom'
+import { Link, useNavigate, useOutletContext, useParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { api } from '../../shared/api'
 import { useAuth } from '../../AuthContext'
 import { useRequestScope } from '../../useRequestScope'
+import { Empty } from '../../components/Empty'
 import { SelectedFilePreview, SelectedImage } from '../../components/SelectedFilePreview'
+import type { Toolkit } from '../../types'
 
-type DraftLesson = { title: string; content: string; duration: number; image: string; contentType?: string }
+type DraftLesson = { id?: number; title: string; content: string; duration: number; image: string;
+  contentType?: string; hasDocument?: boolean; originalContent?: string; clearDocument?: boolean }
 type PublishStatus = 'published' | 'draft'
 
 const MAX_TITLE_LENGTH = 120
@@ -39,6 +42,7 @@ export function PublishPage() {
   const { user, loading, restoreError, refresh } = useAuth()
   const navigate = useNavigate()
   const { openAuth } = useOutletContext<{ openAuth: () => void }>()
+  const { id: editId } = useParams()
   const scope = useRequestScope('publish')
   const [busy, setBusy] = useState<PublishStatus | ''>('')
   const [resources, setResources] = useState<File[]>([])
@@ -53,6 +57,8 @@ export function PublishPage() {
   const [form, setForm] = useState({ title: '', description: '', category: '生信分析', level: '入门', price: '0', tags: '', cover: '' })
   const [lessons, setLessons] = useState<DraftLesson[]>([{ title: '认识工作流与环境准备', content: '', duration: 10, image: '' }])
   const [lessonFiles, setLessonFiles] = useState<(File | null)[]>([null])
+  const [editItem, setEditItem] = useState<{ key: string; item: Toolkit }>()
+  const [loadError, setLoadError] = useState('')
 
   useEffect(() => {
     setBusy('')
@@ -65,14 +71,41 @@ export function PublishPage() {
     setCoverFileError('')
     setLessonImages([null])
     setLessonImageErrors([null])
+    setEditItem(undefined)
+    setLoadError('')
     setForm({ title: '', description: '', category: '生信分析', level: '入门', price: '0', tags: '', cover: '' })
     setLessons([{ title: '认识工作流与环境准备', content: '', duration: 10, image: '' }])
     setLessonFiles([null])
   }, [scope.key])
 
+  // Edit mode: hydrate the form from the current detail (author/admin only).
+  useEffect(() => {
+    if (!editId || loading || !user) return
+    const request = scope.begin('edit-load')
+    void api<Toolkit>(`/toolkits/${editId}`, { signal: request.signal }).then(item => {
+      if (!request.current()) return
+      if (!item.canManage) { setLoadError('只能编辑自己发布的工具包'); return }
+      const ls = item.lessons ?? []
+      setForm({ title: item.title, description: item.description ?? '', category: item.category,
+        level: item.level, price: String(item.price), tags: item.tags.join(','), cover: item.cover ?? '' })
+      setLessons(ls.map(lesson => ({ id: lesson.id, title: lesson.title, content: lesson.content ?? '',
+        duration: lesson.duration, image: lesson.image ?? '', contentType: lesson.contentType,
+        hasDocument: (lesson.contentType ?? 'markdown') !== 'markdown'
+          && (Boolean(lesson.rawFileUrl) || Boolean(lesson.convertedHtml)),
+        originalContent: lesson.content ?? '' })))
+      setLessonFiles(ls.map(() => null))
+      setLessonFileErrors(ls.length ? ls.map(() => null) : [null])
+      setLessonImages(ls.map(() => null))
+      setLessonImageErrors(ls.length ? ls.map(() => null) : [null])
+      setEditItem({ key: scope.key, item })
+    }).catch(e => { if (request.current()) setLoadError((e as Error).message) })
+  }, [editId, loading, user, scope])
+
   if (loading) return <div className="p-12 text-center">正在恢复会话…</div>
   if (restoreError) return <div className="p-12 text-center"><p role="alert">{restoreError}</p><button className="btn-primary" onClick={() => void refresh().catch(() => {})}>重试恢复</button></div>
   if (!user) return <div className="mx-auto max-w-xl px-4 py-20 text-center"><PackageOpen className="mx-auto text-slate-300" size={40} /><h1 className="mt-4 text-xl font-black">登录后即可发布工具包</h1><button onClick={openAuth} className="btn-primary mt-6">登录 / 注册</button></div>
+  if (editId && loadError) return <Empty title="工具包读取失败" detail={loadError} action={<Link className="btn-primary" to="/me/toolkits">返回我的工具包</Link>} />
+  if (editId && !editItem) return <div className="mx-auto max-w-4xl animate-pulse px-4 py-10"><div className="h-[420px] rounded-3xl bg-slate-200" /></div>
 
   const validate = (status: PublishStatus) => {
     const publishing = status === 'published'
@@ -90,7 +123,8 @@ export function PublishPage() {
       if (publishing && !lesson.title.trim()) return `请填写第 ${i + 1} 步的标题`
       if (lesson.title.length > MAX_LESSON_TITLE_LENGTH) return `第 ${i + 1} 步标题不能超过 ${MAX_LESSON_TITLE_LENGTH} 字`
       if (!(status === 'draft' && lesson.duration === 0) && (!Number.isInteger(lesson.duration) || lesson.duration < 1 || lesson.duration > 600)) return `第 ${i + 1} 步的预计学习时长须为 1–600 分钟的整数`
-      if (publishing && !lessonFiles[i] && !lesson.content.trim()) return `请填写第 ${i + 1} 步正文，或上传教程原件`
+      if (publishing && !lessonFiles[i] && !(lesson.hasDocument && !lesson.clearDocument) && !lesson.content.trim()) return `请填写第 ${i + 1} 步正文，或上传教程原件`
+      if (lesson.clearDocument && publishing && !lesson.content.trim()) return `第 ${i + 1} 步已选择移除原件，请填写新的正文`
     }
     if (resources.length > 20) return '配套资源最多选择 20 个'
     return uploadError(coverFile, lessonImages, lessonFiles, resources)
@@ -110,16 +144,39 @@ export function PublishPage() {
     const request = scope.begin('publish')
     try {
       const body = new FormData()
-      Object.entries(form).forEach(([key, value]) => body.append(key, key === 'cover' && coverFile ? '' : value))
+      const editing = Boolean(editId)
+      Object.entries(form).forEach(([key, value]) => {
+        if (key === 'cover') {
+          // Untouched protected cover: omit the field so the backend keeps its
+          // binding (an /api/uploads/ URL cannot round-trip as a plain URL).
+          if (editing && !coverFile && value === (editItem?.item.cover ?? '')) return
+          body.append(key, coverFile ? '' : value)
+          return
+        }
+        body.append(key, value)
+      })
       body.append('status', status)
-      body.append('lessons', JSON.stringify(lessons.map((lesson, index) => ({ ...lesson, image: lessonImages[index] ? '' : lesson.image, preview: index === 0 }))))
+      body.append('lessons', JSON.stringify(lessons.map((lesson, index) => {
+        const entry: Record<string, unknown> = { title: lesson.title, duration: lesson.duration,
+          image: lessonImages[index] ? '' : lesson.image, preview: index === 0 }
+        if (lesson.id) entry.id = lesson.id
+        const keepDocument = editing && lesson.hasDocument && !lessonFiles[index] && !lesson.clearDocument
+        if (keepDocument) {
+          if (lesson.contentType) entry.contentType = lesson.contentType
+        } else {
+          entry.content = lesson.content
+          if (lesson.clearDocument) entry.clearDocument = true
+        }
+        return entry
+      })))
       if (coverFile) body.append('cover_file', coverFile)
       lessonImages.forEach((file, index) => { if (file) body.append(`lesson_image_${index}`, file) })
       lessonFiles.forEach((file, index) => { if (file) body.append(`lesson_file_${index}`, file) })
       resources.forEach(file => body.append('resource', file))
-      const result = await api<{ id: number }>('/toolkits', { method: 'POST', body, signal: request.signal })
+      const result = await api<{ id: number }>(editing ? `/toolkits/${editId}` : '/toolkits',
+        { method: editing ? 'PUT' : 'POST', body, signal: request.signal })
       if (request.current()) {
-        toast.success(status === 'draft' ? '已保存草稿，可在我的工具包中发布' : '工具包发布成功')
+        toast.success(editing ? '修改已保存' : status === 'draft' ? '已保存草稿，可在我的工具包中发布' : '工具包发布成功')
         navigate(`/toolkits/${result.id}`)
       }
     } catch (error) {
@@ -190,14 +247,14 @@ export function PublishPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6 lg:py-12">
-      <Link to="/me/toolkits" className="inline-flex items-center gap-2 text-sm text-slate-500"><ArrowLeft size={16} />返回我的工具包</Link>
+      <Link to={editId ? `/toolkits/${editId}` : '/me/toolkits'} className="inline-flex items-center gap-2 text-sm text-slate-500"><ArrowLeft size={16} />{editId ? '返回工具包详情' : '返回我的工具包'}</Link>
       <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-sm font-bold text-emerald-700">CREATE</p>
-          <h1 className="mt-1 text-3xl font-black text-ink">发布科研工具包</h1>
-          <p className="mt-2 text-sm text-slate-500">清晰描述你的方法，并把每一步写成可复现的教程。</p>
+          <p className="text-sm font-bold text-emerald-700">{editId ? 'EDIT' : 'CREATE'}</p>
+          <h1 className="mt-1 text-3xl font-black text-ink">{editId ? '编辑科研工具包' : '发布科研工具包'}</h1>
+          <p className="mt-2 text-sm text-slate-500">{editId ? '修改后立即生效；已购学习者的目录与内容同步更新。' : '清晰描述你的方法，并把每一步写成可复现的教程。'}</p>
         </div>
-        <Link to="/publish/batch" className="btn-ghost">多个工具包？批量上传</Link>
+        {editId ? <span className="chip bg-amber-100 text-amber-800">编辑模式</span> : <Link to="/publish/batch" className="btn-ghost">多个工具包？批量上传</Link>}
       </div>
 
       <form onSubmit={event => { event.preventDefault(); void submit('published') }} className="mt-8 space-y-6">
@@ -296,19 +353,22 @@ export function PublishPage() {
                   </div>
                 </div>
 
-                <label htmlFor={`lesson-content-${index}`} className="label mt-4">步骤正文{lessonFiles[index] ? '（原件可代替）' : <span aria-hidden="true" className="text-rose-600"> *</span>}</label>
-                <textarea id={`lesson-content-${index}`} required={!lessonFiles[index]} aria-describedby={`lesson-content-help-${index}`} className="input mt-1 min-h-36 resize-y" placeholder="写下操作步骤、命令、参数与注意事项…" value={lesson.content} onChange={event => updateLesson(index, 'content', event.target.value)} />
-                <p id={`lesson-content-help-${index}`} className="mt-1 text-xs text-slate-500">上传教程文件后正文可留空，平台会解析文件用于展示；未上传时请填写正文。</p>
+                <label htmlFor={`lesson-content-${index}`} className="label mt-4">步骤正文{lessonFiles[index] ? '（原件可代替）' : lesson.hasDocument && !lesson.clearDocument ? '（已解析，可修改）' : <span aria-hidden="true" className="text-rose-600"> *</span>}</label>
+                <textarea id={`lesson-content-${index}`} required={!lessonFiles[index] && !(lesson.hasDocument && !lesson.clearDocument)} aria-describedby={`lesson-content-help-${index}`} className="input mt-1 min-h-36 resize-y" placeholder="写下操作步骤、命令、参数与注意事项…" value={lesson.content} onChange={event => updateLesson(index, 'content', event.target.value)} />
+                <p id={`lesson-content-help-${index}`} className="mt-1 text-xs text-slate-500">{lesson.hasDocument && !lesson.clearDocument ? '本节当前由已上传的教程原件解析展示；要改内容请上传新原件，或先“移除教程原件”再编辑正文（Markdown 原件可直接改正文）。' : '上传教程文件后正文可留空，平台会解析文件用于展示；未上传时请填写正文。'}</p>
 
                 <div className="mt-3 flex flex-wrap items-center gap-3">
                   <label htmlFor={`lesson-file-${index}`} className="btn-ghost cursor-pointer text-xs focus-within:ring-2 focus-within:ring-pine focus-within:ring-offset-2">
-                    <UploadCloud size={14} />上传教程文件（选填）
+                    <UploadCloud size={14} />{editId && lesson.hasDocument ? '替换教程文件（选填）' : '上传教程文件（选填）'}
                     <input id={`lesson-file-${index}`} type="file" accept=".md,.markdown,.txt,.docx,.pdf,.html,.htm,.rtf,.pptx" className="sr-only" onChange={event => {
                       const file = event.currentTarget.files?.[0]
                       event.currentTarget.value = ''
                       if (file) updateLessonFile(index, file)
                     }} />
                   </label>
+                  {editId && lesson.hasDocument && !lessonFiles[index] && (lesson.clearDocument
+                    ? <span className="text-xs text-amber-700">已选择移除原件，保存后本节展示你填写的正文<button type="button" className="ml-2 underline text-slate-500" onClick={() => setLessons(current => current.map((x, i) => i === index ? { ...x, clearDocument: false } : x))}>撤销</button></span>
+                    : <><span className="chip bg-slate-100 text-xs text-slate-500">已上传 {lesson.contentType === 'pdf' ? 'PDF' : lesson.contentType === 'ppt' ? 'PPT' : lesson.contentType === 'word' ? 'Word' : lesson.contentType === 'html' ? 'HTML' : 'RTF'} 原件</span><button type="button" className="text-xs text-rose-500 underline" onClick={() => setLessons(current => current.map((x, i) => i === index ? { ...x, clearDocument: true } : x))}>移除教程原件</button></>)}
                   {lessonFiles[index] && <span className="text-xs text-emerald-700">已选择：{lessonFiles[index]?.name}</span>}
                   {lessonFiles[index] && <button type="button" className="text-xs text-slate-500 underline" onClick={() => updateLessonFile(index, null)}>移除原件</button>}
                 </div>
@@ -357,10 +417,10 @@ export function PublishPage() {
         </section>
 
         <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-end">
-          <Link to="/me/toolkits" className="btn-ghost">取消</Link>
-          <p className="text-xs text-slate-400 sm:mr-auto">保存的草稿可之后再发布。</p>
-          <button type="button" disabled={!!busy} onClick={() => void submit('draft')} className="btn-primary">{busy === 'draft' ? '正在保存…' : '保存草稿'}</button>
-          <button disabled={!!busy} className="btn-mint px-7">{busy === 'published' ? '正在发布…' : '发布工具包'}</button>
+          <Link to={editId ? `/toolkits/${editId}` : '/me/toolkits'} className="btn-ghost">取消</Link>
+          <p className="text-xs text-slate-400 sm:mr-auto">{editId ? '保存后状态不变（上架/下架/草稿保持不变）。' : '保存的草稿可之后再发布。'}</p>
+          {!editId && <button type="button" disabled={!!busy} onClick={() => void submit('draft')} className="btn-primary">{busy === 'draft' ? '正在保存…' : '保存草稿'}</button>}
+          <button disabled={!!busy} className="btn-mint px-7">{busy ? '正在保存…' : editId ? '保存修改' : '发布工具包'}</button>
         </div>
       </form>
     </div>
