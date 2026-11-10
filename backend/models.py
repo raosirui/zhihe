@@ -130,8 +130,14 @@ class Lesson(db.Model):
                 "content": self.content if can_view else None, "image": image}
         if can_view:
             data["convertedHtml"] = self.converted_html
-            if self.raw_file_path or any(ref.usage == "lesson_raw" and ref.lesson_id == self.id
-                                         for ref in self.toolkit.file_references):
+            # Only the browser reader formats need the raw route: PDF fetches
+            # inline bytes, PPTX uses it purely as the lesson-preview path
+            # template (its bytes come from the data-only preview endpoint).
+            # Text/office originals are shown via convertedHtml and never
+            # advertised as a transferable file.
+            if self.content_type in ("pdf", "ppt") and (self.raw_file_path or any(
+                    ref.usage == "lesson_raw" and ref.lesson_id == self.id
+                    for ref in self.toolkit.file_references)):
                 data["rawFileUrl"] = f"/api/lesson-raw/{self.id}"
         return data
 

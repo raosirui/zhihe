@@ -131,13 +131,23 @@ assert application.config['JWT_TOKEN_LOCATION']==['headers']
 
 
 @pytest.mark.parametrize("changes", [{}, {"JWT_SECRET_KEY": "replace-with-at-least-32-random-characters"},
-    {"DEBUG": True}, {"WALLET_MODE": "simulation"}, {"DEMO_SEED": True}])
+    {"DEBUG": True}, {"DEMO_SEED": True}])
 def test_production_fail_fast(changes):
     config = {"APP_ENV": "production", "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:", **changes}
     if changes and "JWT_SECRET_KEY" not in changes:
         config["JWT_SECRET_KEY"] = "strong-production-random-like-key-32-characters"
     with pytest.raises(ValueError):
         create_app(config)
+
+
+def test_production_permits_simulated_wallet_only_when_explicit():
+    # Simulation is the deliberate pre-payment launch mode; disabled remains
+    # the strict no-money default.
+    for mode in ("simulation", "disabled"):
+        app = create_app({"APP_ENV": "production", "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+                          "JWT_SECRET_KEY": "strong-production-random-like-key-32-characters",
+                          "WALLET_MODE": mode})
+        assert app.config["WALLET_MODE"] == mode
 
 
 def test_development_key_and_production_database_explicit():

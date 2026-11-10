@@ -145,7 +145,8 @@ def _validate_inline_preview(stream, mime):
     stream.seek(0)
 
 
-def send_asset(asset, download_name=None, as_attachment=False, mimetype=None, inline_preview=False):
+def send_asset(asset, download_name=None, as_attachment=False, mimetype=None, inline_preview=False,
+               inline_document=False):
     """Return a private, no-store Flask response for an already authorized row."""
     if not safe_stored_name(asset.stored_name):
         raise ValueError("Invalid stored name")
@@ -160,8 +161,14 @@ def send_asset(asset, download_name=None, as_attachment=False, mimetype=None, in
     if inline_preview and (asset.purpose != "resource" or as_attachment or
                            effective_mime not in _INLINE_PREVIEW_TYPES):
         raise ValueError("Inline preview requires a safe resource MIME type")
+    # The lesson reader channel is PDF-only and never attachment: scripts,
+    # office and archive originals keep staying private (route enforces type).
+    if inline_document and (asset.purpose != "lesson_raw" or as_attachment or
+                            effective_mime != "application/pdf"):
+        raise ValueError("Inline document transport requires a PDF lesson original")
     # Documents and arbitrary resources must never execute as same-origin HTML.
-    attachment = as_attachment or (asset.purpose not in {"image", "asset"} and not inline_preview)
+    attachment = as_attachment or (asset.purpose not in {"image", "asset"} and not inline_preview
+                                   and not inline_document)
     handle = open_asset(asset)
     try:
         stream = handle.__enter__()  # Open and verify before sending response headers.
@@ -170,13 +177,13 @@ def send_asset(asset, download_name=None, as_attachment=False, mimetype=None, in
             raise APIError("文件不存在", 404) from exc
         raise  # S3 failure is never interpreted as a missing local file.
     try:
-        if inline_preview:
+        if inline_preview or inline_document:
             _validate_inline_preview(stream, effective_mime)
         response = Response(iter(lambda: stream.read(128 * 1024), b""), mimetype=effective_mime)
         response.content_length = os.fstat(stream.fileno()).st_size
         response.headers["Cache-Control"] = "private, no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        if inline_preview:
+        if inline_preview or inline_document:
             response.headers["Content-Security-Policy"] = "sandbox"
         from werkzeug.utils import secure_filename
         fallback = secure_filename(filename) or "download"

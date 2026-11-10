@@ -73,20 +73,60 @@ def convert_word_to_html(file_path):
         return sanitize_html(result.value)
 
 
+def _page_text_quality(text: str) -> int:
+    """Heuristic page score: real CJK counts, garble subtracts.
+
+    pdfplumber turns CJK in some embedded CID-font tables into long 'nnnn'
+    runs; pypdfium2 replaces glyphs without ToUnicode with '■'. Whichever
+    engine scores higher on a page wins that page.
+    """
+    if not text:
+        return -1
+    score = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    score -= 2 * sum(len(m.group(0)) for m in re.finditer(r"[■□￼\uFFFD]{2,}", text))
+    score -= sum(len(m.group(0)) for m in re.finditer(r"n{4,}", text))
+    return score
+
+
+def _extract_pdf_pages(file_path):
+    """Per-page text using the better of pdfplumber and pypdfium2."""
+    with pdfplumber.open(file_path) as pdf:
+        plumber_pages = [page.extract_text() or "" for page in pdf.pages]
+    try:
+        import pypdfium2
+    except ImportError:
+        return plumber_pages
+    try:
+        doc = pypdfium2.PdfDocument(str(file_path))
+    except Exception:
+        return plumber_pages
+    try:
+        if len(doc) != len(plumber_pages):
+            return plumber_pages
+        pdfium_pages = []
+        for page in doc:
+            try:
+                pdfium_pages.append(page.get_textpage().get_text_range().replace("\r\n", "\n"))
+            except Exception:
+                pdfium_pages.append("")
+        return [plumber if _page_text_quality(plumber) >= _page_text_quality(rival) else rival
+                for plumber, rival in zip(plumber_pages, pdfium_pages)]
+    finally:
+        doc.close()
+
+
 def convert_pdf_to_html(file_path):
     """Convert PDF to HTML (extract text with structure)."""
     html_parts = []
-    with pdfplumber.open(file_path) as pdf:
-        for page_num, page in enumerate(pdf.pages, 1):
-            text = page.extract_text()
-            if text:
-                paragraphs = text.split("\n\n")
-                html_parts.append(f'<div class="pdf-page" data-page="{page_num}">')
-                for para in paragraphs:
-                    if para.strip():
-                        escaped = bleach.clean(para, tags=[], strip=True)
-                        html_parts.append(f"<p>{escaped}</p>")
-                html_parts.append("</div>")
+    for page_num, text in enumerate(_extract_pdf_pages(file_path), 1):
+        if text.strip():
+            paragraphs = re.split(r"\n\s*\n", text)
+            html_parts.append(f'<div class="pdf-page" data-page="{page_num}">')
+            for para in paragraphs:
+                if para.strip():
+                    escaped = bleach.clean(para, tags=[], strip=True)
+                    html_parts.append(f"<p>{escaped}</p>")
+            html_parts.append("</div>")
     return "\n".join(html_parts)
 
 

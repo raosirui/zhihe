@@ -104,9 +104,9 @@ def test_api_and_production_factories_do_not_connect_or_initialize(tmp_path, mon
         event.remove(Engine, "connect", forbidden)
 
 
-@pytest.mark.parametrize("extra", [{"JWT_SECRET_KEY": "short"}, {"WALLET_MODE": "simulation"}, {"DEBUG": True},
+@pytest.mark.parametrize("extra", [{"JWT_SECRET_KEY": "short"}, {"DEBUG": True},
                                    {"DEMO_SEED": True}, {"TESTING": True}])
-def test_production_rejects_weak_keys_debug_seed_simulated_money(tmp_path, extra):
+def test_production_rejects_weak_keys_debug_and_seed(tmp_path, extra):
     with pytest.raises(ValueError):
         wsgi.create_app(production_config(tmp_path, **extra))
 

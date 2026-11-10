@@ -116,33 +116,48 @@ def test_ppt_layout_contract_data_only_and_legacy_html(env):
         assert shape["src"].startswith(("data:image/png;base64,", "data:image/jpeg;base64,"))
         assert base64.b64decode(shape["src"].split(",", 1)[1])
     assert "<" not in json.dumps(preview.json)  # Never return embedded HTML.
-    assert client.get(lesson["rawFileUrl"], headers=headers["author"]).data == body
+    # PPTX originals are never transferred through the raw route, not even
+    # to their author; the data-only preview endpoint is the only reader path.
+    assert client.get(lesson["rawFileUrl"], headers=headers["author"]).status_code == 404
+
+
+def test_presentation_bytes_never_transfer_for_any_identity(env):
+    _, client, headers = env
+    toolkit = upload_document(env, sample_ppt(), "lesson.pptx", two_lessons=True)
+    first, locked = (lesson["id"] for lesson in toolkit["lessons"])
+    # Preview lesson is learnable by anyone, so it reaches the PDF-only gate
+    # (404); the paid lesson stays behind the permission gate (403) for
+    # strangers. Either way no slide bytes are ever transferred.
+    for who in (None, "author", "buyer", "admin"):
+        hdrs = headers[who] if who else {}
+        assert client.get(f"/api/lesson-raw/{first}", headers=hdrs).status_code == 404
+        allowed = who in ("author", "admin")
+        expected = 404 if allowed else 403
+        assert client.get(f"/api/lesson-raw/{locked}", headers=hdrs).status_code == expected
 
 
 def test_preview_shares_raw_policy_across_preview_paid_draft_offline(env):
     _, client, headers = env
     toolkit = upload_document(env, sample_ppt(), "lesson.pptx", two_lessons=True)
     first, locked = (lesson["id"] for lesson in toolkit["lessons"])
-    for prefix in ("lesson-preview", "lesson-raw"):
-        assert client.get(f"/api/{prefix}/{first}").status_code == 200
-        denied = client.get(f"/api/{prefix}/{locked}")
-        assert denied.status_code == 403
-        assert b"Visible slide content" not in denied.data
-        assert client.get(f"/api/{prefix}/{locked}", headers=headers["author"]).status_code == 200
-        assert client.get(f"/api/{prefix}/{locked}", headers=headers["admin"]).status_code == 200
-        assert client.get(f"/api/{prefix}/{locked}", headers={"Authorization": "Bearer broken"}).status_code == 401
-        assert client.get(f"/api/{prefix}/999999").status_code == 404
+    prefix = "lesson-preview"
+    assert client.get(f"/api/{prefix}/{first}").status_code == 200
+    denied = client.get(f"/api/{prefix}/{locked}")
+    assert denied.status_code == 403
+    assert b"Visible slide content" not in denied.data
+    assert client.get(f"/api/{prefix}/{locked}", headers=headers["author"]).status_code == 200
+    assert client.get(f"/api/{prefix}/{locked}", headers=headers["admin"]).status_code == 200
+    assert client.get(f"/api/{prefix}/{locked}", headers={"Authorization": "Bearer broken"}).status_code == 401
+    assert client.get(f"/api/{prefix}/999999").status_code == 404
     toolkit_id = toolkit["id"]
     assert client.put(f"/api/toolkits/{toolkit_id}/status", json={"status": "offline"},
                       headers=headers["author"]).status_code == 200
-    for prefix in ("lesson-preview", "lesson-raw"):
-        assert client.get(f"/api/{prefix}/{first}").status_code == 403
-        assert client.get(f"/api/{prefix}/{first}", headers=headers["author"]).status_code == 200
+    assert client.get(f"/api/{prefix}/{first}").status_code == 403
+    assert client.get(f"/api/{prefix}/{first}", headers=headers["author"]).status_code == 200
     draft = upload_document(env, sample_ppt(), "draft.pptx", status="draft")
     draft_id = draft["lessons"][0]["id"]
-    for prefix in ("lesson-preview", "lesson-raw"):
-        assert client.get(f"/api/{prefix}/{draft_id}").status_code == 403
-        assert client.get(f"/api/{prefix}/{draft_id}", headers=headers["author"]).status_code == 200
+    assert client.get(f"/api/{prefix}/{draft_id}").status_code == 403
+    assert client.get(f"/api/{prefix}/{draft_id}", headers=headers["author"]).status_code == 200
     paid = upload_document(env, sample_ppt(), "paid.pptx", two_lessons=True)
     paid_locked = paid["lessons"][1]["id"]
     order = client.post("/api/orders", json={"toolkitId": paid["id"]}, headers=headers["buyer"])
@@ -150,9 +165,31 @@ def test_preview_shares_raw_policy_across_preview_paid_draft_offline(env):
     assert client.post(f"/api/orders/{order.json['id']}/pay", headers=headers["buyer"]).status_code == 200
     assert client.put(f"/api/toolkits/{paid['id']}/status", json={"status": "offline"},
                       headers=headers["author"]).status_code == 200
-    for prefix in ("lesson-preview", "lesson-raw"):
-        assert client.get(f"/api/{prefix}/{paid_locked}", headers=headers["buyer"]).status_code == 200
-        assert client.get(f"/api/{prefix}/{paid_locked}", headers=headers["stranger"]).status_code == 403
+    assert client.get(f"/api/{prefix}/{paid_locked}", headers=headers["buyer"]).status_code == 200
+    assert client.get(f"/api/{prefix}/{paid_locked}", headers=headers["stranger"]).status_code == 403
+
+
+def test_pdf_raw_is_inline_preview_and_permission_gated(env):
+    _, client, headers = env
+    toolkit = upload_document(env, _pdf_bytes(), "reader.pdf", price=10, two_lessons=True)
+    first, locked = (lesson["id"] for lesson in toolkit["lessons"])
+    preview = client.get(f"/api/lesson-raw/{first}")
+    assert preview.status_code == 200
+    assert preview.mimetype == "application/pdf"
+    assert preview.headers["Content-Disposition"].startswith("inline;")
+    assert "attachment" not in preview.headers["Content-Disposition"]
+    assert preview.headers["Content-Security-Policy"] == "sandbox"
+    assert "no-store" in preview.headers["Cache-Control"]
+    assert preview.data == _pdf_bytes()
+    denied = client.get(f"/api/lesson-raw/{locked}")
+    assert denied.status_code == 403
+    assert _pdf_bytes()[:32] not in denied.data
+    assert client.get(f"/api/lesson-raw/{locked}", headers=headers["author"]).status_code == 200
+    order = client.post("/api/orders", json={"toolkitId": toolkit["id"]}, headers=headers["buyer"])
+    assert order.status_code == 201
+    assert client.post(f"/api/orders/{order.json['id']}/pay", headers=headers["buyer"]).status_code == 200
+    assert client.get(f"/api/lesson-raw/{locked}", headers=headers["buyer"]).status_code == 200
+    assert client.get(f"/api/lesson-raw/{locked}", headers=headers["stranger"]).status_code == 403
 
 
 def _raw_asset(app, lesson_id):
@@ -165,50 +202,51 @@ def _raw_asset(app, lesson_id):
 
 def test_raw_and_preview_paths_cannot_escape_storage_or_cross_lessons(env, tmp_path):
     app, client, headers = env
-    kit = upload_document(env, sample_ppt(), "safe.pptx", two_lessons=True)
+    kit = upload_document(env, _pdf_bytes(), "safe.pdf", two_lessons=True)
     first, second = (lesson["id"] for lesson in kit["lessons"])
     # Explicitly construct historical, unregistered originals: object-backed
     # originals are resolved by immutable lesson references, not arbitrary paths.
     with app.app_context():
         root = Path(app.config["UPLOAD_FOLDER"]) / "lesson_raw"
         root.mkdir(exist_ok=True)
-        first_path = root / f"lesson_{first}_fixture.pptx"
-        second_path = root / f"lesson_{second}_fixture.pptx"
-        first_path.write_bytes(sample_ppt())
-        second_path.write_bytes(sample_ppt())
+        first_path = root / f"lesson_{first}_fixture.pdf"
+        second_path = root / f"lesson_{second}_fixture.pdf"
+        first_path.write_bytes(_pdf_bytes())
+        second_path.write_bytes(_pdf_bytes())
         db.session.execute(delete(FileReference).where(
             FileReference.lesson_id.in_([first, second]), FileReference.usage == "lesson_raw"))
         db.session.get(Lesson, first).raw_file_path = str(first_path)
         db.session.get(Lesson, second).raw_file_path = str(second_path)
         db.session.commit()
-    outside = tmp_path / "lesson_raw" / f"lesson_{first}_outside.pptx"
+    outside = tmp_path / "lesson_raw" / f"lesson_{first}_outside.pdf"
     outside.parent.mkdir()
-    outside.write_bytes(sample_ppt())
-    link = first_path.with_name(f"lesson_{first}_link.pptx")
+    outside.write_bytes(_pdf_bytes())
+    link = first_path.with_name(f"lesson_{first}_link.pdf")
     link.symlink_to(first_path)
     for bad in (str(outside), str(second_path), str(link)):
         with app.app_context():
             db.session.get(Lesson, first).raw_file_path = bad
             db.session.commit()
-        for prefix in ("lesson-preview", "lesson-raw"):
-            assert client.get(f"/api/{prefix}/{first}", headers=headers["author"]).status_code == 404
+        # lesson-preview rejects non-ppt; lesson-raw rejects escaped/cross paths.
+        assert client.get(f"/api/lesson-preview/{first}", headers=headers["author"]).status_code == 404
+        assert client.get(f"/api/lesson-raw/{first}", headers=headers["author"]).status_code == 404
     with app.app_context():
         db.session.get(Lesson, first).raw_file_path = str(first_path)
         db.session.commit()
-    assert client.get(f"/api/lesson-preview/{first}").status_code == 200
     assert client.get(f"/api/lesson-raw/{first}").data == first_path.read_bytes()
     link.unlink()
 
 
-def test_historical_mislabeled_document_can_still_be_downloaded(env):
+def test_historical_mislabeled_document_original_is_not_transferable(env):
+    # A document whose lesson type was downgraded to markdown must not leak its
+    # original bytes through the raw channel: only genuine PDF lessons transfer.
     app, client, _ = env
     kit = upload_document(env, sample_ppt(), "historical.pptx", price=0)
     lesson = kit["lessons"][0]
     with app.app_context():
         db.session.get(Lesson, lesson["id"]).content_type = "markdown"
         db.session.commit()
-    raw = client.get(lesson["rawFileUrl"])
-    assert raw.status_code == 200 and raw.data.startswith(b"PK")
+    assert client.get(f"/api/lesson-raw/{lesson['id']}").status_code == 404
     assert client.get(f"/api/lesson-preview/{lesson['id']}").status_code == 404
 
 
@@ -283,13 +321,15 @@ def test_title_only_partial_edit_keeps_markdown_body(env):
     _, client, headers = env
     kit = upload_document(env, b"# Original markdown\n\nDetailed body", "source.md", price=0)
     lesson = kit["lessons"][0]
+    # A non-PDF original is never advertised as a transferable raw file.
+    assert not lesson.get("rawFileUrl")
     response = client.put(f"/api/toolkits/{kit['id']}", json={
         "lessons": [{"id": lesson["id"], "title": "New title"}],
     }, headers=headers["author"])
     assert response.status_code == 200, response.json
     assert response.json["lessons"][0]["content"] == lesson["content"]
     assert response.json["lessons"][0]["contentType"] == "markdown"
-    assert client.get(lesson["rawFileUrl"]).status_code == 200
+    assert not response.json["lessons"][0].get("rawFileUrl")
 
 
 def test_unicode_filename_keeps_extension_and_replacement_reclaims_old_original(env):
@@ -297,9 +337,12 @@ def test_unicode_filename_keeps_extension_and_replacement_reclaims_old_original(
     kit = upload_document(env, sample_ppt(), "教材.pptx", price=0)
     lesson = kit["lessons"][0]
     lesson_id = lesson["id"]
+    assert lesson["contentType"] == "ppt" and lesson["rawFileUrl"]
+    # The pptx bytes are never served through the raw channel; only the
+    # data-only preview is.
+    assert client.get(lesson["rawFileUrl"], headers=headers["author"]).status_code == 404
     original, old_id = _raw_asset(app, lesson_id)
     assert original.suffix == ".pptx" and original.exists()
-    assert client.get(lesson["rawFileUrl"]).status_code == 200
     assert client.get(f"/api/lesson-preview/{lesson_id}").status_code == 200
     response = client.put(f"/api/toolkits/{kit['id']}", data={
         "lessons": json.dumps([{"id": lesson_id, "title": "replaced", "content": "",
@@ -364,7 +407,11 @@ def test_five_other_formats_keep_sanitized_html_and_no_ppt_endpoint(env, name, b
     if name.endswith(".rtf"):
         assert all(tag in html for tag in ("<strong>", "<em>", "<u>", "中"))
     assert client.get(f"/api/lesson-preview/{lesson['id']}").status_code == 404
-    assert client.get(lesson["rawFileUrl"]).data == data
+    if name.endswith(".pdf"):
+        assert client.get(lesson["rawFileUrl"]).data == data
+    else:
+        # Non-PDF originals are never advertised or transferable as raw files.
+        assert not lesson.get("rawFileUrl")
 
 
 def test_rtf_striprtf_fallback_and_html_text_removed(tmp_path, monkeypatch):

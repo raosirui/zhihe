@@ -829,10 +829,10 @@ def test_batch_document_original_matches_single_upload(env):
     assert "Matching converted document content" in batch_lesson["convertedHtml"]
     assert batch_lesson["convertedHtml"] == single_lesson["convertedHtml"]
     for lesson in (single_lesson, batch_lesson):
-        url = lesson["rawFileUrl"]
-        assert client.get(url, headers=headers["seller"]).data == body
-        assert client.get(url).status_code == 403
-        assert client.get(url, headers=headers["other"]).status_code == 403
+        # Word originals render from convertedHtml; their bytes are never
+        # transferable through the raw route (only PDF is).
+        assert not lesson.get("rawFileUrl")
+        assert "Matching converted document content" in lesson["convertedHtml"]
     with app.app_context():
         assert db.session.query(FileReference).filter_by(usage="lesson_raw").count() == 2
     clear = {"id": single_lesson["id"], "title": "chapter", "content": "Fresh Markdown body",
@@ -850,7 +850,9 @@ def test_batch_document_original_matches_single_upload(env):
     lesson = updated.json["lessons"][0]
     assert lesson["id"] == single_lesson["id"] and lesson["contentType"] == "markdown"
     assert lesson["content"] == "Fresh Markdown body" and not lesson.get("rawFileUrl")
-    assert client.get(single_lesson["rawFileUrl"], headers=headers["seller"]).status_code == 404
+    # The (unadvertised) raw route still rejects non-PDF originals with 404,
+    # even after the document reference has been reclaimed.
+    assert client.get(f"/api/lesson-raw/{single_lesson['id']}", headers=headers["seller"]).status_code == 404
     with app.app_context():
         assert db.session.query(FileReference).filter_by(usage="lesson_raw").count() == 1
 
@@ -868,7 +870,11 @@ def test_batch_update_retains_and_explicitly_clears_document_and_images(env):
     tid = created["results"][0]["toolkitId"]
     before = client.get(f"/api/toolkits/{tid}", headers=headers["seller"]).json
     old = before["lessons"][0]
-    assert client.get(old["rawFileUrl"], headers=headers["seller"]).data == b"# Original text"
+    # A Markdown original is retained in storage but never advertised as a
+    # transferable raw file (only PDF/PPT reader channels are exposed).
+    assert not old.get("rawFileUrl")
+    with app.app_context():
+        assert db.session.query(FileReference).filter_by(usage="lesson_raw", toolkit_id=tid).count() == 1
     _, retained = upload_batch(env, [{
         "title": "originals", "description": "description",
         "lessons": [{"id": old["id"], "title": "chapter", "content": "Fallback text"}],
@@ -876,8 +882,9 @@ def test_batch_update_retains_and_explicitly_clears_document_and_images(env):
     assert retained["updated"] == 1 and retained["failed"] == 0, retained
     detail = client.get(f"/api/toolkits/{tid}", headers=headers["seller"]).json
     assert detail["cover"] == before["cover"] and detail["lessons"][0]["image"] == old["image"]
-    assert detail["lessons"][0]["rawFileUrl"] == old["rawFileUrl"]
-    assert client.get(old["rawFileUrl"], headers=headers["seller"]).data == b"# Original text"
+    assert not detail["lessons"][0].get("rawFileUrl")
+    with app.app_context():
+        assert db.session.query(FileReference).filter_by(usage="lesson_raw", toolkit_id=tid).count() == 1
     _, cleared = upload_batch(env, [{
         "title": "originals", "description": "description",
         "lessons": [{"id": old["id"], "title": "chapter", "content": "Fresh text", "clearDocument": True}],
@@ -887,7 +894,7 @@ def test_batch_update_retains_and_explicitly_clears_document_and_images(env):
     assert detail["lessons"][0]["contentType"] == "markdown"
     assert detail["lessons"][0]["content"] == "Fresh text"
     assert not detail["lessons"][0].get("rawFileUrl")
-    assert client.get(old["rawFileUrl"], headers=headers["seller"]).status_code == 404
+    assert client.get(f"/api/lesson-raw/{old['id']}", headers=headers["seller"]).status_code == 404
     with app.app_context():
         assert db.session.query(FileReference).filter_by(usage="lesson_raw", toolkit_id=tid).count() == 0
 
@@ -955,8 +962,11 @@ def test_batch_metadata_update_preserves_document_and_resource(env):
     assert after["status"] == "draft" and after["description"] == "updated"
     assert after["lessons"][0]["id"] == before["lessons"][0]["id"]
     assert after["resources"][0]["refId"] == before["resources"][0]["refId"]
+    # Markdown originals are no longer transferable via lesson-raw; the retained
+    # document is proven by the lesson content still carrying the parsed body.
     assert client.get(f"/api/lesson-raw/{after['lessons'][0]['id']}",
-                      headers=headers["seller"]).data == md
+                      headers=headers["seller"]).status_code == 404
+    assert "disposable tutorial" in after["lessons"][0]["content"] or after["lessons"][0]["contentType"] == "markdown"
     ref_id = after["resources"][0]["refId"]
     assert client.get(f"/api/toolkits/{tid}/resources/{ref_id}/download",
                       headers=headers["seller"]).data == resource
@@ -1001,7 +1011,10 @@ def test_non_markdown_original_cannot_leave_stale_preview_after_text_update(env)
     assert single.status_code == 400 and "不可单独修改正文" in single.json["message"]
     after = client.get(f"/api/toolkits/{tid}", headers=headers["seller"]).json["lessons"][0]
     assert after["content"] == old["content"] and after["convertedHtml"] == old["convertedHtml"]
-    assert after["rawFileUrl"] == old["rawFileUrl"]
+    # A word original is never a transferable raw file; its binding is proven
+    # by contentType and the unchanged convertedHtml after the rejected edit.
+    assert after["contentType"] == old["contentType"] == "word"
+    assert not after.get("rawFileUrl")
     _, cleared = upload_batch(env, [{**text_edit, "lessons": [{**text_edit["lessons"][0],
                                   "clearDocument": True}]}], form={"mode": "update"})
     assert cleared["updated"] == 1 and cleared["failed"] == 0, cleared

@@ -57,6 +57,10 @@ def test_update_after_skip_keeps_draft_lesson_document_and_resource(mysql_app, m
         assert after["resources"][0]["refId"] == original["resources"][0]["refId"], (original, after)
         lesson_id = after["lessons"][0]["id"]
         ref_id = after["resources"][0]["refId"]
-        assert client.get(f"/api/lesson-raw/{lesson_id}", headers=author).data == md
+        # A Markdown lesson original is retained in storage but never served
+        # through lesson-raw (only PDF reader bytes are); resource download is
+        # still the author's own attachment and stays intact.
+        assert client.get(f"/api/lesson-raw/{lesson_id}", headers=author).status_code == 404
+        assert after["lessons"][0]["contentType"] == "markdown"
         assert client.get(f"/api/toolkits/{toolkit_id}/resources/{ref_id}/download",
                           headers=author).data == resource

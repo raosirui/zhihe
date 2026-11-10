@@ -77,13 +77,24 @@ def lesson_asset(stored):
 
 @api.get("/api/lesson-raw/<int:lesson_id>")
 @jwt_required(optional=True)
-def download_lesson_raw(lesson_id):
-    """Download original document file for an accessible lesson."""
-    _, original = _accessible_lesson_raw(lesson_id)
+def lesson_raw_inline(lesson_id):
+    """Inline byte channel reserved for the in-browser PDF reader.
+
+    The original is never served as a downloadable attachment, and only PDF
+    lessons transfer bytes at all: text/office formats render through the
+    sanitized convertedHtml, PPTX through the data-only lesson-preview route,
+    and every request still passes the lesson permission model (is_visible +
+    can_learn enforced inside _accessible_lesson_raw). This closes the leak
+    where a preview lesson's whole Word/Markdown/HTML source was fetchable.
+    """
+    lesson, original = _accessible_lesson_raw(lesson_id)
+    if lesson.content_type != "pdf":
+        raise APIError("该文档不提供原件传输", 404)
     if isinstance(original, FileAsset):
-        return send_asset(original, as_attachment=True,
-                          download_name=original.stored_name.split("_", 1)[-1])
-    return send_file(original, as_attachment=True)
+        if original.state not in {"active", "legacy", "retained"}:
+            raise APIError("资源不存在", 404)
+        return send_asset(original, mimetype="application/pdf", inline_document=True)
+    return send_file(original, mimetype="application/pdf")
 
 
 @api.get("/api/lesson-preview/<int:lesson_id>")

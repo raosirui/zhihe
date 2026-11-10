@@ -89,8 +89,12 @@ def build_config(config_override=None):
                           secret.lower().startswith(("replace-", "change_me", "dev-only-", "dev-local-"))):
         raise ValueError("Non-test applications require an explicit strong JWT_SECRET_KEY of at least 32 characters")
     if env == "production":
-        if config["DEBUG"] or config["TESTING"] or config["DEMO_SEED"] or mode == "simulation":
-            raise ValueError("Production forbids debug, testing, demo seed and simulated money")
+        if config["DEBUG"] or config["TESTING"] or config["DEMO_SEED"]:
+            raise ValueError("Production forbids debug, testing and demo seed")
+        # WALLET_MODE=simulation is the deliberate launch mode until a real
+        # payment provider is integrated: wallet money is a non-cash demo
+        # balance and every UI path labels it as simulated trading. Setting
+        # WALLET_MODE=disabled keeps the strict no-money behaviour instead.
     if config["RATE_LIMIT_CAPACITY"] < 1:
         raise ValueError("RATE_LIMIT_CAPACITY must be positive")
     if config["FILE_STORAGE_BACKEND"] not in {"local", "s3"}:
