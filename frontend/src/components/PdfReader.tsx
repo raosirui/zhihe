@@ -3,7 +3,6 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import 'react-pdf/dist/Page/TextLayer.css'
 import { getSessionGeneration, getToken, sessionMatches } from '../shared/api'
-import { OriginalDownload } from './OriginalDownload'
 import { fetchLessonBlob, lessonRawPath } from './protectedDocumentFetch'
 
 // Keep the worker in the same bundle/dependency version as react-pdf's pdfjs import.
@@ -73,7 +72,7 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
   const failed = Boolean(currentError)
   const previewFailed = () => {
     if (current && sessionMatches(current.generation, current.token)) {
-      setError({ path: current.path, generation: current.generation, message: '无法预览 PDF，可下载原始文件或阅读以下提取文字。' })
+      setError({ path: current.path, generation: current.generation, message: '无法预览 PDF，可阅读以下提取文字。' })
     }
   }
   // react-pdf 11 suspends by default; suspending inside the lazy boundary
@@ -91,7 +90,6 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
         {hasText && <button type="button" aria-expanded={showText} onClick={() => setShowText(value => !value)}>
           {showText ? '收起提取文字' : '阅读提取文字'}
         </button>}
-        <OriginalDownload rawFileUrl={rawFileUrl} contentType="pdf" label="下载 PDF" />
       </div>
     </div>
     {hasText && showText && current && !failed && <section className="pdf-text" aria-label="PDF 提取文字">

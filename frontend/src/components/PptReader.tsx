@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { getSessionGeneration, getToken, sessionMatches } from '../shared/api'
-import { OriginalDownload } from './OriginalDownload'
 import { fetchLessonPreview, lessonPreviewPath } from './protectedDocumentFetch'
 
 type JsonObject = Record<string, unknown>
@@ -148,7 +147,7 @@ function SlideTranscript({ slide, index }: { slide: Preview['slides'][number]; i
   return <section className="ppt-transcript" aria-label={`第 ${index + 1} 张幻灯片文字`}>
     <h3>本页文字</h3>
     {lines.length ? lines.map((line, lineIndex) => <p key={lineIndex}>{line}</p>) :
-      <p>本页没有可提取的文字；请查看图片或下载原始文件。</p>}
+      <p>本页没有可提取的文字；请查看图片。</p>}
   </section>
 }
 
@@ -192,7 +191,6 @@ export default function PptReader({ rawFileUrl, fallback }: { rawFileUrl: string
     <div className="ppt-toolbar"><strong>演示文稿 {preview ? `(${preview.slides.length} 张)` : ''}</strong>
       <div className="ppt-actions">
         {preview && <button type="button" aria-pressed={overview} onClick={() => setOverview(value => !value)}>{overview ? '单张阅读' : '查看全部'}</button>}
-        <OriginalDownload rawFileUrl={rawFileUrl} contentType="ppt" label="下载 PPT" />
       </div>
     </div>
     {currentError || !path ? <div className="ppt-fallback" role="alert"><p>{currentError || '无法预览该演示文稿。'}</p>{fallback}</div>

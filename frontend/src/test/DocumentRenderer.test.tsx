@@ -21,24 +21,17 @@ vi.mock('react-pdf', async () => {
 })
 
 describe('document readers', () => {
-  it('sanitizes converted HTML and downloads the original with same-origin bearer auth only', async () => {
+  it('sanitizes converted HTML and never offers an original-file download', async () => {
     setToken('A')
-    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
-    const create = vi.fn(() => 'blob:original'), revoke = vi.fn()
-    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }))
-    const { calls } = mockFetch(({ path }) => path === '/lesson-raw/14' ? new Response('document') : undefined)
+    const { calls } = mockFetch(() => undefined)
     const { container } = render(<DocumentRenderer contentType="html" convertedHtml={'<h2>安全内容</h2><script>alert(1)</script><p style="color:red">Text</p><a href="javascript:alert(1)">bad</a>'}
       rawFileUrl={`${window.location.origin}/api/lesson-raw/14?token=leak`} />)
     expect(screen.getByRole('heading', { name: '安全内容' })).toBeInTheDocument()
     expect(container.querySelector('script')).toBeNull()
     expect(screen.getByText('Text')).not.toHaveAttribute('style')
     expect(screen.getByText('bad')).not.toHaveAttribute('href', 'javascript:alert(1)')
-    // jsdom's test origin varies: canonical relative URL is always permitted.
-    fireEvent.click(screen.queryByRole('button', { name: '下载原始文件' })!)
-    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
-    expect(calls[0].url).toBe('/api/lesson-raw/14')
-    expect(new Headers(calls[0].options.headers).get('Authorization')).toBe('Bearer A')
-    expect(revoke).toHaveBeenCalledWith('blob:original')
+    expect(screen.queryByRole('button', { name: '下载原始文件' })).not.toBeInTheDocument()
+    expect(calls).toHaveLength(0)
   })
 
   it('never sends a token or automatically fetches an external document URL', () => {
@@ -109,12 +102,12 @@ describe('document readers', () => {
     expect(screen.getByRole('button', { name: '收起提取文字' })).toHaveAttribute('aria-expanded', 'true')
   })
 
-  it('shows extracted text and guarded download if the PDF worker fails', async () => {
+  it('shows extracted text without any download when the PDF worker fails', async () => {
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:broken'), revokeObjectURL: vi.fn() }))
     mockFetch(({ path }) => path === '/lesson-raw/17' ? new Response('broken') : undefined)
     render(<DocumentRenderer contentType="pdf" rawFileUrl="/api/lesson-raw/17" convertedHtml="<p>可读的文字副本</p>" />)
     expect(await screen.findByText('可读的文字副本')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '下载 PDF' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: /下载/ })).not.toBeInTheDocument()
     expect(screen.queryByTestId('pdf-document')).not.toBeInTheDocument()
   })
 
@@ -138,6 +131,6 @@ describe('document readers', () => {
     mockFetch(({ path }) => path === '/lesson-raw/18' ? new Response('Forbidden', { status: 403 }) : undefined)
     render(<DocumentRenderer contentType="pdf" rawFileUrl="/api/lesson-raw/18" convertedHtml="<p>PDF 文字副本</p>" />)
     expect(await screen.findByText('PDF 文字副本')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '下载 PDF' })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: /下载/ })).not.toBeInTheDocument()
   })
 })

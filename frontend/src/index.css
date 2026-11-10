@@ -114,22 +114,6 @@
 .lesson-document .document-content figure img { margin: 0 auto; }
 .lesson-document .document-content figcaption { color: #64748b; font-size: .875rem; text-align: center; }
 .lesson-document .document-content hr { margin: 2rem 0; border-top: 1px solid #cbd5e1; }
-.lesson-document .document-download {
-  display: inline-flex;
-  min-height: 2.5rem;
-  align-items: center;
-  justify-content: center;
-  gap: .45rem;
-  border: 1px solid #cbd5e1;
-  border-radius: .7rem;
-  background: white;
-  padding: .5rem .85rem;
-  color: #065f46;
-  font-size: .875rem;
-  font-weight: 650;
-  text-decoration: none;
-}
-.lesson-document .document-download:hover { background: #f0fdf4; }
 .lesson-document :is(.pdf-toolbar, .ppt-toolbar, .ppt-navigation) {
   display: flex;
   flex-wrap: wrap;
@@ -163,7 +147,6 @@
 }
 .lesson-document :is(.pdf-actions, .ppt-actions, .ppt-navigation, .ppt-overview) button:hover:not(:disabled) { background: #f0fdf4; }
 .lesson-document :is(.pdf-actions, .ppt-actions, .ppt-navigation, .ppt-overview) button:disabled { cursor: not-allowed; opacity: .45; }
-.lesson-document .document-download-control button { color: #065f46; }
 .lesson-document .pdf-reader > .pdf-page {
   display: flex;
   max-width: 100%;

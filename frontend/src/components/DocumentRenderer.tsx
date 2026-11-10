@@ -3,7 +3,6 @@ import DOMPurify from 'dompurify'
 import ReactMarkdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
-import { OriginalDownload } from './OriginalDownload'
 import { lessonRawPath } from './protectedDocumentFetch'
 
 const PdfReader = lazy(() => import('./PdfReader'))
@@ -16,7 +15,7 @@ type Props = {
   rawFileUrl?: string | null
 }
 
-function SemanticDocument({ content, convertedHtml, contentType, rawFileUrl, download = false }: Props & { download?: boolean }) {
+function SemanticDocument({ content, convertedHtml, contentType }: Props) {
   // The server sanitizes conversions, but a client-side allowlist also protects
   // older documents and fallback HTML in case stored content predates that policy.
   const safeHtml = useMemo(() => convertedHtml ? DOMPurify.sanitize(convertedHtml, {
@@ -29,7 +28,6 @@ function SemanticDocument({ content, convertedHtml, contentType, rawFileUrl, dow
     {preferHtml ? <div dangerouslySetInnerHTML={{ __html: safeHtml }} /> : content && !content.startsWith('[Document:') ?
       <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>{content}</ReactMarkdown> :
       safeHtml ? <div dangerouslySetInnerHTML={{ __html: safeHtml }} /> : <p>暂无可预览的文档文字。</p>}
-    {download && <OriginalDownload rawFileUrl={rawFileUrl} contentType={contentType} />}
   </div>
 }
 
@@ -43,5 +41,5 @@ export function DocumentRenderer({ contentType, content, convertedHtml, rawFileU
       <PptReader rawFileUrl={rawFileUrl} fallback={fallback} />
     </Suspense>
   }
-  return <SemanticDocument contentType={contentType} content={content} convertedHtml={convertedHtml} rawFileUrl={rawFileUrl} download />
+  return <SemanticDocument contentType={contentType} content={content} convertedHtml={convertedHtml} />
 }
