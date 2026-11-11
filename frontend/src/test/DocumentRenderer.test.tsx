@@ -134,3 +134,44 @@ describe('document readers', () => {
     expect(screen.queryByRole('button', { name: /下载/ })).not.toBeInTheDocument()
   })
 })
+
+describe('office layout preview (LibreOffice derived PDF)', () => {
+  it('renders a Word lesson through the inline PDF reader using lesson-pdf, never the original bytes', async () => {
+    setToken('A')
+    const create = vi.fn(() => 'blob:word'), revoke = vi.fn()
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }))
+    const { calls } = mockFetch(({ path }) => path === '/lesson-pdf/70'
+      ? new Response('pdf-bytes', { headers: { 'Content-Type': 'application/pdf' } }) : undefined)
+    render(<DocumentRenderer contentType="word" content="[Document: x.docx]" convertedHtml="<h2>旧文字</h2>"
+      rawFileUrl="/api/lesson-raw/70" pdfPreviewUrl="/api/lesson-pdf/70" />)
+    expect(await screen.findByLabelText('PDF 文档阅读器')).toBeInTheDocument()
+    await waitFor(() => expect(calls.some(c => c.path === '/lesson-pdf/70')).toBe(true))
+    // The Word original is never pulled through the raw byte route.
+    expect(calls.some(c => c.path === '/lesson-raw/70')).toBe(false)
+  })
+
+  it('falls back to the sanitized text view when the layout preview is unavailable (422)', async () => {
+    setToken('A')
+    mockFetch(({ path }) => path === '/lesson-pdf/71' ? json({ message: 'render failed' }, 422) : undefined)
+    render(<DocumentRenderer contentType="word" content="[Document: x.docx]" convertedHtml="<h3>文字副本</h3>"
+      pdfPreviewUrl="/api/lesson-pdf/71" />)
+    expect(await screen.findByRole('heading', { name: '文字副本' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('PDF 文档阅读器')).not.toBeInTheDocument()
+  })
+
+  it('shows the text view for RTF lessons with no layout preview advertised', () => {
+    const { calls } = mockFetch(() => undefined)
+    render(<DocumentRenderer contentType="richtext" content="[Document: x.rtf]" convertedHtml="<h4>富文本</h4>" />)
+    expect(screen.getByRole('heading', { name: '富文本' })).toBeInTheDocument()
+    expect(calls).toHaveLength(0)
+  })
+
+  it('never auto-fetches an external preview URL and keeps it to the text view', () => {
+    setToken('private')
+    const { calls } = mockFetch(() => undefined)
+    render(<DocumentRenderer contentType="word" content="[Document: x]" convertedHtml="<h3>摘要</h3>"
+      pdfPreviewUrl="https://evil.example/api/lesson-pdf/99" />)
+    expect(screen.getByRole('heading', { name: '摘要' })).toBeInTheDocument()
+    expect(calls).toHaveLength(0)
+  })
+})

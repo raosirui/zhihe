@@ -3,7 +3,7 @@ import { Document, Page, pdfjs } from 'react-pdf'
 import workerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import 'react-pdf/dist/Page/TextLayer.css'
 import { getSessionGeneration, getToken, sessionMatches } from '../shared/api'
-import { fetchLessonBlob, lessonRawPath } from './protectedDocumentFetch'
+import { fetchLessonBlob, lessonDocumentPath } from './protectedDocumentFetch'
 
 // Keep the worker in the same bundle/dependency version as react-pdf's pdfjs import.
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
@@ -21,11 +21,12 @@ const pdfOptions = {
 type Source = { path: string; generation: number; token: string | null; url: string }
 
 export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUrl: string; fallback: ReactNode; hasText: boolean }) {
-  const path = lessonRawPath(rawFileUrl)
+  const path = lessonDocumentPath(rawFileUrl)
   const pageContainer = useRef<HTMLDivElement>(null)
   const [revision, setRevision] = useState(getSessionGeneration)
   const [source, setSource] = useState<Source | null>(null)
   const [error, setError] = useState<{ path: string; generation: number; message: string } | null>(null)
+  const [layoutFallback, setLayoutFallback] = useState<{ path: string; generation: number } | null>(null)
   const [pageNumber, setPageNumber] = useState(1), [totalPages, setTotalPages] = useState(0)
   const [zoomIndex, setZoomIndex] = useState(1), [availableWidth, setAvailableWidth] = useState(720)
   const [showText, setShowText] = useState(() => hasText && onSmallScreen())
@@ -58,9 +59,10 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
         if (!active || !sessionMatches(generation, token)) return
         objectUrl = URL.createObjectURL(blob)
         setSource({ path, generation, token, url: objectUrl })
-      }).catch(() => {
+      }).catch((failure: unknown) => {
         if (active && sessionMatches(generation, token)) {
-          setError({ path, generation, message: 'PDF 加载失败，请重新登录或稍后再试。' })
+          if ((failure as { layoutUnavailable?: boolean })?.layoutUnavailable) setLayoutFallback({ path, generation })
+          else setError({ path, generation, message: 'PDF 加载失败，请重新登录或稍后再试。' })
         }
       })
     }
@@ -70,6 +72,9 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
   const current = source?.path === path && sessionMatches(source.generation, source.token) ? source : null
   const currentError = error?.path === path && error.generation === getSessionGeneration() ? error.message : ''
   const failed = Boolean(currentError)
+  // Derived layout preview unavailable (422/404): show the sanitized text.
+  if (path && !current && !failed && layoutFallback?.path === path && sessionMatches(layoutFallback.generation, getToken()))
+    return <>{fallback}</>
   const previewFailed = () => {
     if (current && sessionMatches(current.generation, current.token)) {
       setError({ path: current.path, generation: current.generation, message: '无法预览 PDF，可阅读以下提取文字。' })

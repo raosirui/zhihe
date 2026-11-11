@@ -5,7 +5,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from flask import current_app, jsonify, send_file, send_from_directory
+from flask import Response, current_app, jsonify, send_file, send_from_directory
 from flask_jwt_extended import jwt_required
 from sqlalchemy import select
 
@@ -17,7 +17,8 @@ from security import APIError, client_ip, optional_user, rate_hits
 from access import can_learn, is_visible
 from document_converter import detect_content_type, is_allowed_extension, render_ppt_preview
 from file_service import directory, open_asset, safe_stored_name, send_asset
-from validation import IMAGE_EXTENSIONS
+from preview_pdf import PreviewUnavailable, render_lesson_preview
+from validation import IMAGE_EXTENSIONS, PREVIEW_PDF_FORMATS
 
 
 @api.get("/api/uploads/<stored>")
@@ -95,6 +96,39 @@ def lesson_raw_inline(lesson_id):
             raise APIError("资源不存在", 404)
         return send_asset(original, mimetype="application/pdf", inline_document=True)
     return send_file(original, mimetype="application/pdf")
+
+
+@api.get("/api/lesson-pdf/<int:lesson_id>")
+@jwt_required(optional=True)
+def lesson_pdf_preview(lesson_id):
+    """Layout-faithful derived preview for Word/RTF originals.
+
+    Renders the lesson's original through headless LibreOffice into a PDF
+    (generated on demand, cached by the original's SHA-256) and serves it
+    INLINE to the browser pdf.js reader. Bytes leave the server only for
+    lessons the caller can actually learn (_accessible_lesson_raw enforces
+    visibility + can_learn); the source document is never transferred. Any
+    rendering failure returns 422 so the reader falls back to the sanitized
+    semantic HTML it already stores.
+    """
+    lesson, original = _accessible_lesson_raw(lesson_id)
+    if lesson.content_type not in PREVIEW_PDF_FORMATS:
+        raise APIError("该文档不支持版式预览", 404)
+    user = optional_user()
+    rate_hits([(f"lesson-pdf:{user.id if user else client_ip()}", 20, 60)])
+    try:
+        path = render_lesson_preview(lesson, original)
+    except PreviewUnavailable:
+        raise APIError("资源不存在", 404)
+    except RuntimeError as failure:
+        current_app.logger.warning("preview render failed for lesson %s: %s", lesson_id, failure)
+        raise APIError("版式预览生成失败，已回退到文字预览", 422) from failure
+    response = send_file(path, mimetype="application/pdf")
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Disposition"] = 'inline; filename="preview.pdf"'
+    response.headers["Content-Security-Policy"] = "sandbox"
+    return response
 
 
 @api.get("/api/lesson-preview/<int:lesson_id>")

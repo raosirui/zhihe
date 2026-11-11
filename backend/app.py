@@ -183,11 +183,11 @@ def create_app(config_override=None):
     def harden_responses(response):
         response.headers["X-Content-Type-Options"] = "nosniff"
         protected = request.path.startswith((LESSON_ASSET_PATH, "/api/lesson-raw/", "/api/lesson-preview/",
-                                              "/api/auth/", "/api/wallet", "/api/me/", "/api/orders", "/api/admin/"))
+                                             "/api/lesson-pdf/", "/api/auth/", "/api/wallet", "/api/me/", "/api/orders", "/api/admin/"))
         resource_preview = request.path.startswith("/api/toolkits/") and request.path.endswith("/preview")
         authenticated = bool(request.headers.get("Authorization"))
         if protected or resource_preview or authenticated or response.status_code >= 400:
-            response.headers["Cache-Control"] = ("private, no-store" if request.path.startswith("/api/lesson-preview/")
+            response.headers["Cache-Control"] = ("private, no-store" if request.path.startswith(("/api/lesson-preview/", "/api/lesson-raw/", "/api/lesson-pdf/"))
                                                  else "no-store")
             response.headers["Pragma"] = "no-cache"
         if resource_preview or request.path.startswith((ASSET_PATH, LESSON_ASSET_PATH)):

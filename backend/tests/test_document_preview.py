@@ -487,3 +487,65 @@ def test_ppt_user_text_is_data_not_html(tmp_path):
     result = render_ppt_preview(file_path)
     assert result["slides"][0]["shapes"][0]["paragraphs"][0]["runs"][0]["text"] == '<img src=x onerror="alert(1)">'
     assert all(shape["type"] == "text" for shape in result["slides"][0]["shapes"])
+
+
+def _fake_preview(app):
+    """A real readable PDF file path inside the app's preview cache directory."""
+    import preview_pdf
+    with app.app_context():
+        root = preview_pdf.preview_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "fake_render.pdf"
+    path.write_bytes(_pdf_bytes())
+    return path
+
+
+def test_word_lesson_exposes_pdf_preview_and_gates_bytes(env, monkeypatch):
+    import api.routes.assets as assets
+    app, client, headers = env
+    toolkit = upload_document(env, _docx_bytes(), "reader.docx", price=10, two_lessons=True)
+    free, locked = (lesson["id"] for lesson in toolkit["lessons"])
+    # The detail (author view) advertises the derived preview route, never raw bytes.
+    detail = client.get(f"/api/toolkits/{toolkit['id']}", headers=headers["author"]).json
+    for lesson in detail["lessons"]:
+        assert lesson["pdfPreviewUrl"] == f"/api/lesson-pdf/{lesson['id']}"
+        assert not lesson.get("rawFileUrl")
+    target = _fake_preview(app)
+    monkeypatch.setattr(assets, "render_lesson_preview", lambda lesson, original: target)
+    # Permission gate: locked lesson is 403 for a stranger even though a
+    # preview file exists; the author may fetch it.
+    assert client.get(f"/api/lesson-pdf/{locked}").status_code == 403
+    assert client.get(f"/api/lesson-pdf/{locked}", headers={"Authorization": "Bearer broken"}).status_code == 401
+    served = client.get(f"/api/lesson-pdf/{locked}", headers=headers["author"])
+    assert served.status_code == 200
+    assert served.mimetype == "application/pdf"
+    assert served.headers["Content-Disposition"].startswith("inline;")
+    assert "attachment" not in served.headers["Content-Disposition"]
+    assert served.headers["Content-Security-Policy"] == "sandbox"
+    assert "no-store" in served.headers["Cache-Control"]
+    assert served.data == _pdf_bytes()
+    # The free preview lesson is readable without auth.
+    assert client.get(f"/api/lesson-pdf/{free}").status_code == 200
+
+
+def test_pdf_preview_format_and_failure_gates(env, monkeypatch):
+    import api.routes.assets as assets
+    import preview_pdf
+    app, client, headers = env
+    # Native PDF and PPT lessons keep their own readers; the layout preview
+    # route refuses them (404) so it is never an alternate download path.
+    pdf_kit = upload_document(env, _pdf_bytes(), "native.pdf", price=0)
+    assert client.get(f"/api/lesson-pdf/{pdf_kit['lessons'][0]['id']}", headers=headers["author"]).status_code == 404
+    ppt_kit = upload_document(env, sample_ppt(), "deck.pptx", price=0)
+    assert client.get(f"/api/lesson-pdf/{ppt_kit['lessons'][0]['id']}", headers=headers["author"]).status_code == 404
+    # Word render failure => 422 (reader falls back to the text view).
+    docx_kit = upload_document(env, _docx_bytes(), "f.docx", price=0)
+    lid = docx_kit["lessons"][0]["id"]
+    def boom(lesson, original):
+        raise RuntimeError("soffice died")
+    monkeypatch.setattr(assets, "render_lesson_preview", boom)
+    assert client.get(f"/api/lesson-pdf/{lid}", headers=headers["author"]).status_code == 422
+    def unavailable(lesson, original):
+        raise preview_pdf.PreviewUnavailable()
+    monkeypatch.setattr(assets, "render_lesson_preview", unavailable)
+    assert client.get(f"/api/lesson-pdf/{lid}", headers=headers["author"]).status_code == 404

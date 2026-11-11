@@ -120,6 +120,11 @@ class Lesson(db.Model):
     raw_file_path = db.Column(db.String(500))
     converted_html = deferred(db.Column(long_text()))
 
+    def _has_original(self):
+        return bool(self.raw_file_path) or any(
+            ref.usage == "lesson_raw" and ref.lesson_id == self.id
+            for ref in self.toolkit.file_references)
+
     def serialize(self, can_view=False):
         image = self.image if can_view else None
         if image and image.startswith("file:"):
@@ -135,10 +140,14 @@ class Lesson(db.Model):
             # template (its bytes come from the data-only preview endpoint).
             # Text/office originals are shown via convertedHtml and never
             # advertised as a transferable file.
-            if self.content_type in ("pdf", "ppt") and (self.raw_file_path or any(
-                    ref.usage == "lesson_raw" and ref.lesson_id == self.id
-                    for ref in self.toolkit.file_references)):
+            if self.content_type in ("pdf", "ppt") and self._has_original():
                 data["rawFileUrl"] = f"/api/lesson-raw/{self.id}"
+            # Office documents (Word/RTF) render layout-faithfully through a
+            # LibreOffice-derived preview PDF in the pdf.js reader; the route
+            # is permission-gated and generates the preview on demand, so it
+            # stays invisible unless the original exists.
+            if self.content_type in ("word", "richtext") and self._has_original():
+                data["pdfPreviewUrl"] = f"/api/lesson-pdf/{self.id}"
         return data
 
 

@@ -34,6 +34,12 @@ DOCUMENT_EXTENSIONS = {
 DOCUMENT_FILE_EXTENSIONS = {extension for extensions in DOCUMENT_EXTENSIONS.values()
                             for extension in extensions}
 
+# Office formats whose layout is preserved by rendering the original through
+# LibreOffice into a derived preview PDF (browser HTML reflow of their text —
+# mammoth for .docx, striprtf for .rtf — loses pagination, tables and
+# positioning). PPT keeps its bespoke data-only slide reader instead.
+PREVIEW_PDF_FORMATS = frozenset({"word", "richtext"})
+
 
 def parse_money(value, minimum, maximum, field="金额") -> Decimal:
     """Return finite, bounded money rounded to cents; malformed values raise ValueError."""

@@ -3,7 +3,7 @@ import DOMPurify from 'dompurify'
 import ReactMarkdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
-import { lessonRawPath } from './protectedDocumentFetch'
+import { lessonDocumentPath, lessonRawPath } from './protectedDocumentFetch'
 
 const PdfReader = lazy(() => import('./PdfReader'))
 const PptReader = lazy(() => import('./PptReader'))
@@ -13,6 +13,7 @@ type Props = {
   content?: string | null
   convertedHtml?: string | null
   rawFileUrl?: string | null
+  pdfPreviewUrl?: string | null
 }
 
 function SemanticDocument({ content, convertedHtml, contentType }: Props) {
@@ -31,12 +32,16 @@ function SemanticDocument({ content, convertedHtml, contentType }: Props) {
   </div>
 }
 
-export function DocumentRenderer({ contentType, content, convertedHtml, rawFileUrl }: Props) {
+export function DocumentRenderer({ contentType, content, convertedHtml, rawFileUrl, pdfPreviewUrl }: Props) {
   const fallback = <SemanticDocument content={content} convertedHtml={convertedHtml} contentType={contentType} />
+  // Word/RTF are shown as a layout-faithful PDF rendered server-side; when no
+  // preview is available the sanitized text view is used instead.
+  const previewPath = (contentType === 'word' || contentType === 'richtext') && lessonDocumentPath(pdfPreviewUrl) ? pdfPreviewUrl! : null
+  const readerSource = contentType === 'pdf' && rawFileUrl && lessonRawPath(rawFileUrl) ? rawFileUrl : previewPath
+  if (readerSource) return <Suspense fallback={<p role="status">正在准备 PDF 阅读器…</p>}>
+    <PdfReader rawFileUrl={readerSource} fallback={fallback} hasText={Boolean(convertedHtml || (content && !content.startsWith('[Document:')))} />
+  </Suspense>
   if (rawFileUrl && lessonRawPath(rawFileUrl)) {
-    if (contentType === 'pdf') return <Suspense fallback={<p role="status">正在准备 PDF 阅读器…</p>}>
-      <PdfReader rawFileUrl={rawFileUrl} fallback={fallback} hasText={Boolean(convertedHtml || (content && !content.startsWith('[Document:')))} />
-    </Suspense>
     if (contentType === 'ppt') return <Suspense fallback={<p role="status">正在准备演示文稿…</p>}>
       <PptReader rawFileUrl={rawFileUrl} fallback={fallback} />
     </Suspense>
