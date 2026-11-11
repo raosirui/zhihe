@@ -142,11 +142,11 @@ class Lesson(db.Model):
             # advertised as a transferable file.
             if self.content_type in ("pdf", "ppt") and self._has_original():
                 data["rawFileUrl"] = f"/api/lesson-raw/{self.id}"
-            # Office documents (Word/RTF) render layout-faithfully through a
-            # LibreOffice-derived preview PDF in the pdf.js reader; the route
+            # Office documents (Word/RTF/PPT) render layout-faithfully through
+            # a LibreOffice-derived preview PDF in the pdf.js reader; the route
             # is permission-gated and generates the preview on demand, so it
             # stays invisible unless the original exists.
-            if self.content_type in ("word", "richtext") and self._has_original():
+            if self.content_type in ("word", "ppt", "richtext") and self._has_original():
                 data["pdfPreviewUrl"] = f"/api/lesson-pdf/{self.id}"
         return data
 

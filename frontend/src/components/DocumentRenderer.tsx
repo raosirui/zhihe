@@ -33,18 +33,20 @@ function SemanticDocument({ content, convertedHtml, contentType }: Props) {
 }
 
 export function DocumentRenderer({ contentType, content, convertedHtml, rawFileUrl, pdfPreviewUrl }: Props) {
-  const fallback = <SemanticDocument content={content} convertedHtml={convertedHtml} contentType={contentType} />
-  // Word/RTF are shown as a layout-faithful PDF rendered server-side; when no
-  // preview is available the sanitized text view is used instead.
-  const previewPath = (contentType === 'word' || contentType === 'richtext') && lessonDocumentPath(pdfPreviewUrl) ? pdfPreviewUrl! : null
-  const readerSource = contentType === 'pdf' && rawFileUrl && lessonRawPath(rawFileUrl) ? rawFileUrl : previewPath
+  const semantic = <SemanticDocument content={content} convertedHtml={convertedHtml} contentType={contentType} />
+  const rawOk = Boolean(rawFileUrl) && Boolean(lessonRawPath(rawFileUrl))
+  // PPTX keeps its data-only slide reader as a degraded view (used when the
+  // layout PDF is not advertised or cannot be rendered); text formats degrade
+  // to the semantic view.
+  const slideReader = contentType === 'ppt' && rawOk
+    ? <Suspense fallback={<p role="status">正在准备演示文稿…</p>}><PptReader rawFileUrl={rawFileUrl!} fallback={semantic} /></Suspense>
+    : semantic
+  const previewOk = Boolean(pdfPreviewUrl) && Boolean(lessonDocumentPath(pdfPreviewUrl))
+  const readerSource = contentType === 'pdf' && rawOk ? rawFileUrl!
+    : (contentType === 'word' || contentType === 'ppt' || contentType === 'richtext') && previewOk ? pdfPreviewUrl! : null
   if (readerSource) return <Suspense fallback={<p role="status">正在准备 PDF 阅读器…</p>}>
-    <PdfReader rawFileUrl={readerSource} fallback={fallback} hasText={Boolean(convertedHtml || (content && !content.startsWith('[Document:')))} />
+    <PdfReader rawFileUrl={readerSource} fallback={contentType === 'ppt' ? slideReader : semantic}
+      hasText={Boolean(convertedHtml || (content && !content.startsWith('[Document:')))} />
   </Suspense>
-  if (rawFileUrl && lessonRawPath(rawFileUrl)) {
-    if (contentType === 'ppt') return <Suspense fallback={<p role="status">正在准备演示文稿…</p>}>
-      <PptReader rawFileUrl={rawFileUrl} fallback={fallback} />
-    </Suspense>
-  }
-  return <SemanticDocument contentType={contentType} content={content} convertedHtml={convertedHtml} />
+  return slideReader
 }

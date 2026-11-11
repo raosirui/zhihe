@@ -167,9 +167,11 @@ def convert_original(lesson_id: int, source_bytes: bytes, source_sha: str) -> Pa
                 source = stage / "input.bin"
                 source.write_bytes(source_bytes)
                 source.chmod(0o644)
+                # Let LibreOffice pick writer/impress/calc_pdf_Export from the
+                # input type; forcing one filter breaks other office formats.
                 args = [soffice, "--headless", "--invisible", "--norestore",
                         "-env:UserInstallation=file://" + str(profile),
-                        "--convert-to", "pdf:writer_pdf_Export", "--outdir", str(stage), str(source)]
+                        "--convert-to", "pdf", "--outdir", str(stage), str(source)]
                 if prefix:
                     args = prefix + args
                 env = {"PATH": "/usr/bin:/bin", "HOME": str(stage), "LANG": "C.UTF-8",

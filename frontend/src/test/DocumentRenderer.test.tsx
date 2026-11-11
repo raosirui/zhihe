@@ -174,4 +174,27 @@ describe('office layout preview (LibreOffice derived PDF)', () => {
     expect(screen.getByRole('heading', { name: '摘要' })).toBeInTheDocument()
     expect(calls).toHaveLength(0)
   })
+
+  it('prefers the layout PDF over the slide reader for PPT when a preview is advertised', async () => {
+    setToken('A')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:pptpdf'), revokeObjectURL: vi.fn() }))
+    mockFetch(({ path }) => path === '/lesson-pdf/72'
+      ? new Response('pdf-bytes', { headers: { 'Content-Type': 'application/pdf' } }) : undefined)
+    render(<DocumentRenderer contentType="ppt" content="[Document: x.pptx]" convertedHtml="<h3>文字副本</h3>"
+      rawFileUrl="/api/lesson-raw/72" pdfPreviewUrl="/api/lesson-pdf/72" />)
+    expect(await screen.findByLabelText('PDF 文档阅读器')).toBeInTheDocument()
+    expect(screen.queryByLabelText('演示文稿阅读器')).not.toBeInTheDocument()
+  })
+
+  it('degrades to the slide reader when the PPT layout preview fails (422)', async () => {
+    setToken('A')
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:pptpdf'), revokeObjectURL: vi.fn() }))
+    mockFetch(({ path }) => path === '/lesson-pdf/73' ? json({ message: 'render failed' }, 422)
+      : path === '/lesson-preview/73' ? json({ version: 1, width: 960, height: 540, slides: [
+        { shapes: [{ type: 'text', x: 12, y: 30, width: 400, height: 80, paragraphs: [{ runs: [{ text: '回退幻灯片' }] }] }] },
+      ] }) : undefined)
+    render(<DocumentRenderer contentType="ppt" content="[Document: x.pptx]" convertedHtml="<h3>文字副本</h3>"
+      rawFileUrl="/api/lesson-raw/73" pdfPreviewUrl="/api/lesson-pdf/73" />)
+    expect(await screen.findByText('回退幻灯片')).toBeInTheDocument()
+  })
 })

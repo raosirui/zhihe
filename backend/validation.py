@@ -35,10 +35,11 @@ DOCUMENT_FILE_EXTENSIONS = {extension for extensions in DOCUMENT_EXTENSIONS.valu
                             for extension in extensions}
 
 # Office formats whose layout is preserved by rendering the original through
-# LibreOffice into a derived preview PDF (browser HTML reflow of their text —
-# mammoth for .docx, striprtf for .rtf — loses pagination, tables and
-# positioning). PPT keeps its bespoke data-only slide reader instead.
-PREVIEW_PDF_FORMATS = frozenset({"word", "richtext"})
+# LibreOffice into a derived preview PDF. Word/RTF HTML reflow (mammoth,
+# striprtf) loses pagination and tables; PPTX slides with charts, complex
+# autoshapes and grouped layouts cannot be reconstructed by the data-only
+# reader either — the layout PDF is the faithful primary view.
+PREVIEW_PDF_FORMATS = frozenset({"word", "ppt", "richtext"})
 
 
 def parse_money(value, minimum, maximum, field="金额") -> Decimal:

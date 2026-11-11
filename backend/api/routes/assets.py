@@ -101,15 +101,16 @@ def lesson_raw_inline(lesson_id):
 @api.get("/api/lesson-pdf/<int:lesson_id>")
 @jwt_required(optional=True)
 def lesson_pdf_preview(lesson_id):
-    """Layout-faithful derived preview for Word/RTF originals.
+    """Layout-faithful derived preview for office originals (Word/PPT/RTF).
 
     Renders the lesson's original through headless LibreOffice into a PDF
     (generated on demand, cached by the original's SHA-256) and serves it
-    INLINE to the browser pdf.js reader. Bytes leave the server only for
-    lessons the caller can actually learn (_accessible_lesson_raw enforces
-    visibility + can_learn); the source document is never transferred. Any
-    rendering failure returns 422 so the reader falls back to the sanitized
-    semantic HTML it already stores.
+    INLINE to the browser pdf.js reader. Charts, grouped shapes and merged
+    tables that the data-only slide reader cannot reconstruct render fully
+    here. Bytes leave the server only for lessons the caller can actually
+    learn (_accessible_lesson_raw enforces visibility + can_learn); the
+    source document itself is never transferred. Rendering failures return
+    422 so the reader degrades to the slide/semantic fallback view.
     """
     lesson, original = _accessible_lesson_raw(lesson_id)
     if lesson.content_type not in PREVIEW_PDF_FORMATS:

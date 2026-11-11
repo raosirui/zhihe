@@ -532,13 +532,15 @@ def test_pdf_preview_format_and_failure_gates(env, monkeypatch):
     import api.routes.assets as assets
     import preview_pdf
     app, client, headers = env
-    # Native PDF and PPT lessons keep their own readers; the layout preview
-    # route refuses them (404) so it is never an alternate download path.
+    # Native PDF lessons keep their own reader; the layout preview refuses them.
     pdf_kit = upload_document(env, _pdf_bytes(), "native.pdf", price=0)
     assert client.get(f"/api/lesson-pdf/{pdf_kit['lessons'][0]['id']}", headers=headers["author"]).status_code == 404
+    # PPT is now a first-class layout preview client: charts and grouped
+    # shapes cannot be reconstructed by the data-only reader alone.
     ppt_kit = upload_document(env, sample_ppt(), "deck.pptx", price=0)
-    assert client.get(f"/api/lesson-pdf/{ppt_kit['lessons'][0]['id']}", headers=headers["author"]).status_code == 404
-    # Word render failure => 422 (reader falls back to the text view).
+    ppt_lesson = ppt_kit["lessons"][0]
+    assert ppt_lesson["pdfPreviewUrl"] == f"/api/lesson-pdf/{ppt_lesson['id']}"
+    # Word render failure => 422 (reader falls back to the slide/semantic view).
     docx_kit = upload_document(env, _docx_bytes(), "f.docx", price=0)
     lid = docx_kit["lessons"][0]["id"]
     def boom(lesson, original):
