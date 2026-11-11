@@ -9,7 +9,6 @@ import { fetchLessonBlob, lessonDocumentPath } from './protectedDocumentFetch'
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl
 
 const zoomSteps = [0.75, 1, 1.25, 1.5, 2]
-const onSmallScreen = () => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 640px)').matches
 // The Vite static-copy plugin serves these PDF.js assets locally in development
 // and emits them beside the app in production. Never depend on an external CDN.
 const pdfAssets = `${import.meta.env.BASE_URL}pdfjs/`
@@ -63,7 +62,7 @@ function ScrollPage({ pageNumber, width, ratio, onRatio, onError }: {
   </div>
 }
 
-export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUrl: string; fallback: ReactNode; hasText: boolean }) {
+export default function PdfReader({ rawFileUrl, fallback }: { rawFileUrl: string; fallback: ReactNode }) {
   const path = lessonDocumentPath(rawFileUrl)
   const pageContainer = useRef<HTMLDivElement>(null)
   const [revision, setRevision] = useState(getSessionGeneration)
@@ -72,7 +71,6 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
   const [layoutFallback, setLayoutFallback] = useState<{ path: string; generation: number } | null>(null)
   const [pageNumber, setPageNumber] = useState(1), [totalPages, setTotalPages] = useState(0)
   const [zoomIndex, setZoomIndex] = useState(1), [availableWidth, setAvailableWidth] = useState(720)
-  const [showText, setShowText] = useState(() => hasText && onSmallScreen())
   const [scroll, setScroll] = useState(readStoredMode)
   const [pageRatio, setPageRatio] = useState(1.414)
 
@@ -81,7 +79,6 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
     window.addEventListener('zhihe:session', sessionChanged)
     return () => window.removeEventListener('zhihe:session', sessionChanged)
   }, [])
-  useEffect(() => { setShowText(hasText && onSmallScreen()) }, [path, revision, hasText])
   useEffect(() => {
     const container = pageContainer.current
     if (!container) return
@@ -168,7 +165,7 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
     return <>{fallback}</>
   const previewFailed = () => {
     if (current && sessionMatches(current.generation, current.token)) {
-      setError({ path: current.path, generation: current.generation, message: '无法预览 PDF，可阅读以下提取文字。' })
+      setError({ path: current.path, generation: current.generation, message: '无法预览 PDF。' })
     }
   }
   const pageWidth = Math.max(1, Math.round(availableWidth * zoomSteps[zoomIndex]))
@@ -177,7 +174,6 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
   // unmounts this component and revokes its blob URL before parsing finishes.
   return <section className="pdf-reader" aria-label="PDF 文档阅读器">
     <div className="pdf-toolbar">
-      <strong>PDF 文档</strong>
       <div className="pdf-actions">
         <button type="button" onClick={() => goToPage(Math.max(1, pageNumber - 1))} disabled={!totalPages || pageNumber === 1}>上一页</button>
         <span aria-live="polite">{totalPages ? `${pageNumber} / ${totalPages}` : '— / —'}</span>
@@ -189,15 +185,8 @@ export default function PdfReader({ rawFileUrl, fallback, hasText }: { rawFileUr
           title={totalPages > MAX_SCROLL_PAGES ? `文档超过 ${MAX_SCROLL_PAGES} 页，连续滚动不可用` : '所有页面纵向排列，向下滚动连续阅读'}>
           连续滚动
         </button>
-        {hasText && <button type="button" aria-expanded={showText} onClick={() => setShowText(value => !value)}>
-          {showText ? '收起提取文字' : '阅读提取文字'}
-        </button>}
       </div>
     </div>
-    {hasText && showText && current && !failed && <section className="pdf-text" aria-label="PDF 提取文字">
-      <h3>PDF 提取文字</h3>
-      {fallback}
-    </section>}
     <div className={scroll ? 'pdf-page pdf-scroll' : 'pdf-page'} ref={pageContainer}>
       {failed ? <div className="pdf-fallback" role="alert"><p>{currentError}</p>{fallback}</div> : !current ? (
         <p role="status">PDF 加载中…</p>

@@ -92,14 +92,15 @@ describe('document readers', () => {
     unmount()
   })
 
-  it('expands readable PDF text by default on narrow screens', async () => {
+  it('renders the PDF reader without the removed text-extraction panel', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true })))
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:mobile'), revokeObjectURL: vi.fn() }))
     mockFetch(({ path }) => path === '/lesson-raw/16' ? new Response('PDF') : undefined)
     render(<DocumentRenderer contentType="pdf" rawFileUrl="/api/lesson-raw/16" convertedHtml="<p>手机版可读的文档文字</p>" />)
-    expect(await screen.findByRole('region', { name: 'PDF 提取文字' })).toHaveTextContent('手机版可读的文档文字')
+    expect(await screen.findByLabelText('PDF 文档阅读器')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByRole('button', { name: '下一页' })).toBeEnabled())
-    expect(screen.getByRole('button', { name: '收起提取文字' })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.queryByRole('region', { name: 'PDF 提取文字' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /提取文字/ })).not.toBeInTheDocument()
   })
 
   it('shows extracted text without any download when the PDF worker fails', async () => {
@@ -111,17 +112,15 @@ describe('document readers', () => {
     expect(screen.queryByTestId('pdf-document')).not.toBeInTheDocument()
   })
 
-  it('revokes a loaded PDF blob and shows extracted text when the PDF cannot be fetched', async () => {
+  it('revokes a loaded PDF blob and paginates without the removed text panel', async () => {
     const create = vi.fn(() => 'blob:preview'), revoke = vi.fn()
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }))
     mockFetch(({ path }) => path === '/lesson-raw/19' ? new Response('PDF') : undefined)
     const reader = render(<DocumentRenderer contentType="pdf" rawFileUrl="/api/lesson-raw/19" convertedHtml="<p>PDF 文字副本</p>" />)
     expect(await screen.findByTestId('pdf-document')).toHaveAttribute('data-suspense', 'false')
     expect(screen.getByTestId('pdf-page-number')).toHaveAttribute('data-suspense', 'false')
-    expect(screen.queryByRole('region', { name: 'PDF 提取文字' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '阅读提取文字' }))
-    expect(screen.getByRole('region', { name: 'PDF 提取文字' })).toHaveTextContent('PDF 文字副本')
-    fireEvent.click(screen.getByRole('button', { name: '收起提取文字' }))
+    // The extracted-text toggle and panel are gone; the reader has no such control.
+    expect(screen.queryByRole('button', { name: /提取文字/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'PDF 提取文字' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '下一页' }))
     expect(screen.getByTestId('pdf-page-number')).toHaveTextContent('2')

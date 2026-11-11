@@ -45,8 +45,7 @@ export function DocumentRenderer({ contentType, content, convertedHtml, rawFileU
   const readerSource = contentType === 'pdf' && rawOk ? rawFileUrl!
     : (contentType === 'word' || contentType === 'ppt' || contentType === 'richtext') && previewOk ? pdfPreviewUrl! : null
   if (readerSource) return <Suspense fallback={<p role="status">正在准备 PDF 阅读器…</p>}>
-    <PdfReader rawFileUrl={readerSource} fallback={contentType === 'ppt' ? slideReader : semantic}
-      hasText={Boolean(convertedHtml || (content && !content.startsWith('[Document:')))} />
+    <PdfReader rawFileUrl={readerSource} fallback={contentType === 'ppt' ? slideReader : semantic} />
   </Suspense>
   return slideReader
 }

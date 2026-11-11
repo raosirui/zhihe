@@ -166,17 +166,6 @@
 .lesson-document .pdf-reader > .pdf-page.pdf-scroll { flex-direction: column; gap: 1rem; }
 .lesson-document .pdf-reader .pdf-scroll-page { width: 100%; }
 .lesson-document .pdf-reader .pdf-scroll-page canvas { box-shadow: 0 2px 16px rgb(15 23 42 / 12%); }
-.lesson-document .pdf-text {
-  min-width: 0;
-  margin-top: 1rem;
-  border: 1px solid #d6e5da;
-  border-radius: .8rem;
-  background: #f5fbf6;
-  padding: 1rem 1.25rem;
-}
-.lesson-document .pdf-text h3 { margin: 0 0 .65rem; color: #0a1f1a; font-size: 1rem; font-weight: 750; }
-.lesson-document .pdf-text .document-content { line-height: 1.8; }
-.lesson-document .pdf-text .document-content .pdf-page p { white-space: pre-line; }
 .lesson-document .ppt-stage {
   width: 100%;
   max-width: 100%;
