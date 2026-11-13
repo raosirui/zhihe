@@ -73,6 +73,13 @@ export default function PdfReader({ rawFileUrl, fallback }: { rawFileUrl: string
   const [zoomIndex, setZoomIndex] = useState(1), [availableWidth, setAvailableWidth] = useState(720)
   const [scroll, setScroll] = useState(readStoredMode)
   const [pageRatio, setPageRatio] = useState(1.414)
+  // Page to re-anchor to after a mode switch; a state (not a ref) so the
+  // scroll-sync effect re-subscribes once it clears.
+  const [anchorPage, setAnchorPage] = useState<number | null>(null)
+  // Until this timestamp, the midline sync ignores scroll events: lazy-mounted
+  // pages resize the layout right after a mode switch and the browser's scroll
+  // anchoring would otherwise drag the counter back toward page 1.
+  const anchorQuietUntil = useRef(0)
 
   useEffect(() => {
     const sessionChanged = () => setRevision(getSessionGeneration())
@@ -117,11 +124,15 @@ export default function PdfReader({ rawFileUrl, fallback }: { rawFileUrl: string
 
   // In continuous mode the page counter follows whichever page crosses the
   // viewport midline, so 上一页/下一页 stay meaningful while free-scrolling.
+  // A pending mode-switch keeps the reader anchored to the page the learner was
+  // on, so syncing is skipped until that anchor is applied (else the initial
+  // scroll-to-top would snap the counter back to page 1).
   useEffect(() => {
-    if (!scroll || !current || failed) return
+    if (!scroll || !current || failed || anchorPage !== null) return
     let frame = 0
     const update = () => {
       frame = 0
+      if (performance.now() < anchorQuietUntil.current) return
       const root = pageContainer.current
       if (!root) return
       const midline = window.innerHeight / 2
@@ -135,7 +146,6 @@ export default function PdfReader({ rawFileUrl, fallback }: { rawFileUrl: string
       setPageNumber(previous => previous === active ? previous : active)
     }
     const onScroll = () => { if (!frame) frame = requestAnimationFrame(update) }
-    update()
     window.addEventListener('scroll', onScroll, { passive: true })
     window.addEventListener('resize', onScroll)
     return () => {
@@ -143,15 +153,30 @@ export default function PdfReader({ rawFileUrl, fallback }: { rawFileUrl: string
       window.removeEventListener('resize', onScroll)
       if (frame) cancelAnimationFrame(frame)
     }
-  }, [scroll, current, failed])
+  }, [scroll, current, failed, anchorPage])
 
-  const toggleScroll = () => {
+  const toggleScroll = (next: boolean) => {
+    if (next === scroll || (next && totalPages > MAX_SCROLL_PAGES)) return
+    setAnchorPage(pageNumber)
     setScroll(value => {
-      const next = !value
       try { localStorage.setItem(SCROLL_MODE_KEY, next ? '1' : '0') } catch { /* private mode */ }
       return next
     })
   }
+  // Switching mode swaps the page layout; keep the reader parked on the page
+  // the learner was on so the toggle reads as a change of view, not a reset.
+  useEffect(() => {
+    if (anchorPage === null) return
+    const page = anchorPage
+    const id = requestAnimationFrame(() => {
+      (pageContainer.current?.querySelector(`[data-page-number="${page}"]`) || pageContainer.current)
+        ?.scrollIntoView({ block: 'start' })
+      setPageNumber(page)
+      anchorQuietUntil.current = performance.now() + 900
+      setAnchorPage(null)
+    })
+    return () => cancelAnimationFrame(id)
+  }, [anchorPage, scroll])
   const goToPage = (target: number) => {
     setPageNumber(target)
     if (scroll) {
@@ -170,6 +195,7 @@ export default function PdfReader({ rawFileUrl, fallback }: { rawFileUrl: string
   }
   const pageWidth = Math.max(1, Math.round(availableWidth * zoomSteps[zoomIndex]))
   const scrollDisabled = !current || totalPages > MAX_SCROLL_PAGES
+  const tooLong = totalPages > MAX_SCROLL_PAGES
   // react-pdf 11 suspends by default; suspending inside the lazy boundary
   // unmounts this component and revokes its blob URL before parsing finishes.
   return <section className="pdf-reader" aria-label="PDF 文档阅读器">
@@ -181,22 +207,25 @@ export default function PdfReader({ rawFileUrl, fallback }: { rawFileUrl: string
         <button type="button" aria-label="缩小 PDF" onClick={() => setZoomIndex(n => Math.max(0, n - 1))} disabled={!current || zoomIndex === 0}>－</button>
         <span aria-live="polite">{Math.round(zoomSteps[zoomIndex] * 100)}%</span>
         <button type="button" aria-label="放大 PDF" onClick={() => setZoomIndex(n => Math.min(zoomSteps.length - 1, n + 1))} disabled={!current || zoomIndex === zoomSteps.length - 1}>＋</button>
-        <button type="button" aria-pressed={scroll} disabled={scrollDisabled} onClick={toggleScroll}
-          title={totalPages > MAX_SCROLL_PAGES ? `文档超过 ${MAX_SCROLL_PAGES} 页，连续滚动不可用` : '所有页面纵向排列，向下滚动连续阅读'}>
-          连续滚动
-        </button>
+        <span className="pdf-seg" role="group" aria-label="阅读模式">
+          <button type="button" aria-pressed={!scroll} disabled={scrollDisabled} onClick={() => toggleScroll(false)}
+            title="一次显示一页，用上一页/下一页翻看">单页</button>
+          <button type="button" aria-pressed={scroll} disabled={scrollDisabled} onClick={() => toggleScroll(true)}
+            title={tooLong ? `文档超过 ${MAX_SCROLL_PAGES} 页，连续滚动不可用` : '所有页面纵向排列，向下滚动连续阅读'}>连续滚动</button>
+        </span>
       </div>
     </div>
+    {tooLong && <p className="mt-2 text-xs text-slate-400">文档超过 {MAX_SCROLL_PAGES} 页，仅支持单页浏览。</p>}
     <div className={scroll ? 'pdf-page pdf-scroll' : 'pdf-page'} ref={pageContainer}>
       {failed ? <div className="pdf-fallback" role="alert"><p>{currentError}</p>{fallback}</div> : !current ? (
         <p role="status">PDF 加载中…</p>
       ) : <Document
-        key={`${current.url}:${scroll ? 'scroll' : 'single'}`}
+        key={current.url}
         file={current.url}
         options={pdfOptions}
         suspense={false}
         loading={<p role="status">正在解析 PDF…</p>}
-        onLoadSuccess={({ numPages }) => { if (sessionMatches(current.generation, current.token)) { setTotalPages(numPages); setPageNumber(1) } }}
+        onLoadSuccess={({ numPages }) => { if (sessionMatches(current.generation, current.token)) setTotalPages(numPages) }}
         onLoadError={previewFailed}
         onSourceError={previewFailed}
       >{scroll

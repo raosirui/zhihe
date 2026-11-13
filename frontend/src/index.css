@@ -147,6 +147,14 @@
 }
 .lesson-document :is(.pdf-actions, .ppt-actions, .ppt-navigation, .ppt-overview) button:hover:not(:disabled) { background: #f0fdf4; }
 .lesson-document :is(.pdf-actions, .ppt-actions, .ppt-navigation, .ppt-overview) button:disabled { cursor: not-allowed; opacity: .45; }
+/* Reading-mode segmented toggle: the active option is unmistakably filled so
+   clicking 单页 / 连续滚动 always registers as a visible change. */
+.lesson-document .pdf-seg { display: inline-flex; overflow: hidden; border: 1px solid #cbd5e1; border-radius: .6rem; }
+.lesson-document .pdf-seg button { min-height: 2.4rem; border: 0; border-radius: 0; background: #fff; padding: .35rem .8rem; color: #164238; font-size: .875rem; font-weight: 650; }
+.lesson-document .pdf-seg button + button { border-left: 1px solid #cbd5e1; }
+.lesson-document .pdf-seg button:hover:not(:disabled):not([aria-pressed="true"]) { background: #f0fdf4; }
+.lesson-document .pdf-seg button[aria-pressed="true"] { background: #0f5132; color: #eafff2; }
+.lesson-document .pdf-seg button:disabled { cursor: not-allowed; opacity: .45; }
 .lesson-document .pdf-reader > .pdf-page {
   display: flex;
   max-width: 100%;
