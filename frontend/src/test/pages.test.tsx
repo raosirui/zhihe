@@ -2,7 +2,7 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ToolkitListPage } from '../pages/ToolkitListPage'
 import { CheckoutPage } from '../pages/CheckoutPage'
-import { AdminPage } from '../pages/AdminPage'
+import { AdminOrdersPage, AdminPage, AdminToolkitsPage, AdminUsersPage } from '../pages/AdminPage'
 import { ToolkitDetailPage } from '../pages/ToolkitDetailPage'
 import { HomePage } from '../pages/HomePage'
 import { MyToolkitsPage, WalletPage } from '../pages/MePages'
@@ -132,13 +132,11 @@ describe('checkout verification and route guards', () => {
 })
 
 describe('permissions and administrative recovery', () => {
-  it('waits for administrator restoration, permits retry after offline failure and has no refund action', async () => {
+  it('waits for administrator restoration, permits retry after offline failure, and shows the outline', async () => {
     setToken('A'); const restore = deferred<Response>(); let failed = false
     mockFetch(({ path }) => {
       if (path === '/auth/me') return failed ? json({ ...user, role: 'admin' }) : restore.promise
-      if (path === '/admin/stats') return json({ users: 1, toolkits: 1, orders: 1, revenue: 10 })
-      if (path === '/admin/toolkits') return json([toolkit(1)])
-      if (path === '/admin/orders') return json([{ ...order(1), status: 'paid' }, { ...order(2), status: 'refunded' }])
+      if (path.startsWith('/admin/stats')) return json({ users: 1, toolkits: 1, orders: 1, revenue: 10 })
     })
     const result = renderPage(<AdminPage />, '/admin', '/admin')
     expect(screen.getByRole('status')).toHaveTextContent('正在恢复管理员会话')
@@ -146,8 +144,55 @@ describe('permissions and administrative recovery', () => {
     await settle(() => restore.reject(new Error('offline')))
     expect(screen.getByRole('alert')).toHaveTextContent('offline'); expect(result.router.state.location.pathname).toBe('/admin')
     failed = true; fireEvent.click(screen.getByRole('button', { name: '重试恢复' }))
-    expect(await screen.findByText('管理中心')).toBeInTheDocument(); await screen.findByText('ORDER-1')
-    expect(screen.queryByRole('button', { name: /退款/ })).not.toBeInTheDocument(); expect(screen.getByText('已退款')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '管理中心' })).toBeInTheDocument()
+    expect(await screen.findByText('注册用户')).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: '工具包管理' }).length).toBeGreaterThan(0)
+  })
+
+  it('paginates the admin toolkit table and moderates without any refund action', async () => {
+    setToken('A'); const adminUser = { ...user, role: 'admin' as const }
+    let queried = ''
+    mockFetch(({ path, options }) => {
+      if (path === '/auth/me') return json(adminUser)
+      if (path.startsWith('/admin/toolkits?')) {
+        queried = path
+        return json({ items: [toolkit(1), { ...toolkit(2), status: 'offline', featured: true }], total: 45, page: 2, pages: 3 })
+      }
+      if (options?.method === 'POST' || options?.method === 'PUT') return json({ ...toolkit(1), featured: false, status: 'published' })
+    })
+    renderPage(<AdminToolkitsPage />, '/admin/toolkits', '/admin/toolkits')
+    await screen.findByText('Toolkit 1')
+    // The pagination summary keeps its count inside a <b> node; match loosely.
+    expect(screen.getByText('45', { selector: 'b' })).toBeInTheDocument()
+    expect(screen.getByLabelText('跳转到页码')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('搜索关键词'), { target: { value: 'gene' } })
+    await screen.findByText('Toolkit 1')
+    expect(screen.queryByRole('button', { name: /退款/ })).not.toBeInTheDocument()
+    // jump-to-page drives a new request
+    const jump = screen.getByLabelText('跳转到页码'); fireEvent.change(jump, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: '跳转' }))
+    await waitFor(() => expect(queried).toContain('page=2'))
+  })
+
+  it('lists users and orders with role/status filters and no refund action', async () => {
+    setToken('A'); const adminUser = { ...user, role: 'admin' as const }
+    mockFetch(({ path }) => {
+      if (path === '/auth/me') return json(adminUser)
+      if (path.startsWith('/admin/orders?')) return json({ items: [{ ...order(1), status: 'paid' }, { ...order(2), status: 'refunded' }], total: 2, page: 1, pages: 1 })
+      if (path.startsWith('/admin/users?')) return json({ items: [{ id: 1, username: 'root', nickname: 'Root', role: 'admin', balance: 0, frozenBalance: 0, email: null, bio: '', published: 3, income: 120, spent: 0, ratings: 2 }], total: 1, page: 1, pages: 1 })
+    })
+    const result = renderPage(<AdminOrdersPage />, '/admin/orders', '/admin/orders')
+    await screen.findByText('ORDER-1')
+    // One refunded row badge exists (the status filter pill reads 已退款 too, so
+    // assert at least one badge rather than a unique text node).
+    expect(screen.getAllByText('已退款').length).toBeGreaterThan(0)
+    // No refund *action*: the only "已退款" is the status filter pill + badge,
+    // never a standalone 退款 button.
+    expect(screen.queryByRole('button', { name: /^退款$/ })).not.toBeInTheDocument()
+    await result.navigate('/')
+    renderPage(<AdminUsersPage />, '/admin/users', '/admin/users')
+    expect(await screen.findByText('超级管理员')).toBeInTheDocument()
+    expect(screen.getByText('@root')).toBeInTheDocument()
   })
   it('free anonymous start and paid preview links never create orders or open auth', async () => {
     mockFetch(({ path }) => path === '/toolkits/1' ? json(toolkit(1)) : path === '/toolkits/2' ? json({ ...toolkit(2, [lesson(21)]), price: 20, canLearn: false }) : undefined)

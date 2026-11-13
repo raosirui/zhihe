@@ -3,7 +3,7 @@ import { Layout } from '../components/Layout'
 import { HomePage, ToolkitDetailPage, ToolkitListPage } from '../features/catalog'
 import { CheckoutPage } from '../features/commerce'
 import { LearnPage } from '../features/learning'
-import { AdminPage } from '../features/admin'
+import { AdminOrdersPage, AdminPage, AdminToolkitsPage, AdminUsersPage } from '../features/admin'
 import { BatchPublishPage, PublishPage } from '../features/publishing'
 import { FavoritesPage, MeDashboard, MeLayout, MyToolkitsPage, OrdersPage, WalletPage } from '../features/account'
 
@@ -27,6 +27,9 @@ export default function AppRoutes() {
           <Route path="orders" element={<OrdersPage />} />
         </Route>
         <Route path="admin" element={<AdminPage />} />
+        <Route path="admin/toolkits" element={<AdminToolkitsPage />} />
+        <Route path="admin/users" element={<AdminUsersPage />} />
+        <Route path="admin/orders" element={<AdminOrdersPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
